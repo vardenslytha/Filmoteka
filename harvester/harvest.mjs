@@ -8,7 +8,7 @@ const VID = '48OMNIS_BRP:BRACZ';
 const RTYPE = process.env.RTYPE || 'videos'; // 'videos' (filmy) albo 'audios' (muzyka)
 const TERMS = RTYPE === 'videos' ? ['film', 'reżyseria'] : ['muzyka', 'cd'];
 const PAGE = 50;
-const OFFSET_LIMIT = 1950; // Primo odrzuca offset powyżej ~2000
+const OFFSET_LIMIT = 1900; // Primo odrzuca offset powyżej ~2000
 const DELAY_MS = 400;      // bądź uprzejmy dla serwera biblioteki
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -88,21 +88,42 @@ function toRecord(doc, year, libs) {
 async function main() {
   const from = Number(process.argv[2] || 2000);
   const to = Number(process.argv[3] || new Date().getFullYear());
+  // Token gościa wygasa po kilku minutach (HTTP 401), więc odświeżamy go zawczasu.
+  const TOKEN_TTL_MS = 90_000;
   let jwt = await guestJwt();
+  let jwtAt = Date.now();
+  const freshJwt = async (force = false) => {
+    if (force || Date.now() - jwtAt > TOKEN_TTL_MS) { jwt = await guestJwt(); jwtAt = Date.now(); }
+    return jwt;
+  };
   const records = new Map();
   const libs = {};
+  let errors = 0;
 
   for (let year = from; year <= to; year++) {
     for (const term of TERMS) {
       for (let offset = 0; offset <= OFFSET_LIMIT; offset += PAGE) {
-        let json;
-        try {
-          json = await search(jwt, { term, year, offset });
-        } catch (e) {
-          // token wygasł albo chwilowy błąd – odśwież i spróbuj raz jeszcze
-          await sleep(2000);
-          jwt = await guestJwt();
-          json = await search(jwt, { term, year, offset });
+        let json = null;
+        // do 3 prób z rosnącą przerwą; przy każdym błędzie nowy token
+        for (const [attempt, wait] of [[1, 0], [2, 3000], [3, 15000]]) {
+          try {
+            if (wait) await sleep(wait);
+            json = await search(await freshJwt(attempt > 1), { term, year, offset });
+            break;
+          } catch (e) {
+            if (attempt === 3) {
+              // jedna zła strona nie może zatrzymać całego pobierania
+              errors++;
+              process.stderr.write(`\nPominięto ${year} „${term}” od ${offset}: ${e.message}\n`);
+              if (errors > 25) throw new Error('Za dużo błędów katalogu, przerywam.');
+            }
+          }
+        }
+        if (!json) break;
+        if (json.errorCode) {
+          // np. przekroczony limit offsetu – idziemy do następnej frazy
+          process.stderr.write(`\nKatalog odpowiedział: ${json.errorMessage || json.errorCode} (${year} ${term} @${offset})\n`);
+          break;
         }
         const docs = json.docs || [];
         for (const d of docs) {
