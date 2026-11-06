@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Półka Raczyńskich</title>
+<meta name="description" content="Filmy na płytach z Biblioteki Raczyńskich w Poznaniu i ich dostępność w filiach.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky filter bar over a dense wall of DVD keep-cases; detail opens as a side sheet (bottom sheet on phones). */
+:root{
+  --bg:#eceef2; --surface:#ffffff; --fg:#14161b; --muted:#555c69; --line:#d4d8e0;
+  --accent:#2a46c9; --accent-ink:#ffffff; --ok:#1f7a45; --ok-bg:#dff1e6; --no:#9a3412; --no-bg:#fbe7dc;
+  --display:"Bricolage Grotesque",ui-sans-serif,system-ui,sans-serif;
+  --body:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#111318; --surface:#1b1e25; --fg:#f2f2f2; --muted:#bcc1cc; --line:#2e333d;
+  --accent:#7d94ff; --accent-ink:#0d1020; --ok:#7fdca3; --ok-bg:#16301f; --no:#ffab85; --no-bg:#3a1f14; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#111318; --surface:#1b1e25; --fg:#f2f2f2; --muted:#bcc1cc; --line:#2e333d;
+  --accent:#7d94ff; --accent-ink:#0d1020; --ok:#7fdca3; --ok-bg:#16301f; --no:#ffab85; --no-bg:#3a1f14; color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+img{max-width:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.5;margin:0}
+.wrap{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));max-width:1400px;margin:0 auto}
+header.top{padding-block:28px 12px;display:flex;flex-wrap:wrap;gap:12px 32px;align-items:flex-end;justify-content:space-between}
+h1{font-family:var(--display);font-weight:800;font-size:clamp(28px,5vw,46px);line-height:1;margin:0;letter-spacing:-.02em;text-wrap:balance}
+h1 span{color:var(--accent)}
+.lede{color:var(--muted);margin:8px 0 0;max-width:60ch}
+.stamp{font-family:var(--mono);font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);border-bottom:1px solid var(--line)}
+.bar .wrap{padding-block:12px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+input[type=search],select{font:inherit;color:var(--fg);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 12px;min-width:0}
+input[type=search]{flex:1 1 240px}
+select{flex:0 1 auto;max-width:100%}
+.toggle{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);cursor:pointer;user-select:none;white-space:nowrap}
+.toggle input{accent-color:var(--accent);margin:0}
+button{font:inherit;cursor:pointer}
+.btn{border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:8px;padding:9px 14px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.meta{padding-block:14px 6px;display:flex;flex-wrap:wrap;gap:8px 18px;color:var(--muted);font-size:13px}
+.meta b{color:var(--fg);font-variant-numeric:tabular-nums}
+.chips{display:flex;flex-wrap:wrap;gap:6px;padding-block:4px 14px}
+.chip{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:999px;padding:4px 11px;font-size:13px}
+.chip[aria-pressed="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:22px 16px;padding-block:6px 60px}
+@media (max-width:480px){.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 12px}}
+.card{all:unset;cursor:pointer;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card:focus-visible .case{outline:2px solid var(--accent);outline-offset:3px}
+.case{position:relative;aspect-ratio:135/190;max-width:100%;border-radius:4px 7px 7px 4px;overflow:hidden;color:#fff;
+  box-shadow:0 1px 0 rgba(0,0,0,.08),0 8px 18px -10px rgba(0,0,0,.45);transition:transform .18s ease}
+.card:hover .case{transform:translateY(-3px) rotate(-.4deg)}
+.case::before{content:"";position:absolute;inset:0 auto 0 0;width:9px;background:linear-gradient(90deg,rgba(0,0,0,.35),rgba(255,255,255,.08))}
+.case .art{position:absolute;inset:0}
+.case img.poster{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.case.has-poster .txt{display:none}
+.case.has-poster::before{z-index:1}
+.case .fmt,.case .wl{z-index:2}
+.case .txt{position:absolute;inset:0;padding:14px 12px 12px 20px;display:flex;flex-direction:column;justify-content:space-between}
+.case .yr{font-family:var(--mono);font-size:11px;letter-spacing:.06em;opacity:.85}
+.case .ttl{font-family:var(--display);font-weight:700;font-size:17px;line-height:1.05;letter-spacing:-.01em;text-wrap:balance;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 1px 2px rgba(0,0,0,.25)}
+.case .fmt{position:absolute;top:10px;right:10px;font-family:var(--mono);font-size:10px;font-weight:500;padding:2px 6px;border-radius:3px;background:rgba(0,0,0,.35)}
+.case .wl{position:absolute;left:20px;top:10px;font-family:var(--mono);font-size:10px;padding:2px 6px;border-radius:3px;background:#fff;color:#111}
+.under{display:flex;flex-direction:column;gap:3px;min-width:0}
+.under .dir{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pill{align-self:flex-start;font-size:12px;font-weight:600;padding:2px 9px;border-radius:999px;font-variant-numeric:tabular-nums}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}
+.pill.no{background:var(--no-bg);color:var(--no)}
+.empty{padding:60px 0;color:var(--muted);text-align:center}
+.more{display:flex;justify-content:center;padding-bottom:60px}
+/* sheet */
+.scrim{position:fixed;inset:0;background:rgba(10,12,18,.45);z-index:20}
+.sheet{position:fixed;z-index:21;top:0;right:0;bottom:0;width:min(440px,100%);background:var(--surface);border-left:1px solid var(--line);
+  overflow:auto;padding:calc(20px + env(safe-area-inset-top,0px)) max(22px,env(safe-area-inset-right,0px)) calc(28px + env(safe-area-inset-bottom,0px)) 22px;display:flex;flex-direction:column;gap:16px}
+@media (max-width:640px){.sheet{top:auto;left:0;width:100%;max-height:86%;border-left:0;border-top:1px solid var(--line);border-radius:16px 16px 0 0;padding-left:max(18px,env(safe-area-inset-left,0px))}}
+.sheet h2{font-family:var(--display);font-size:26px;line-height:1.08;margin:0;text-wrap:balance}
+.sheet .orig{color:var(--muted);margin:4px 0 0;font-style:italic}
+.sheet .close{position:absolute;top:calc(12px + env(safe-area-inset-top,0px));right:max(12px,env(safe-area-inset-right,0px));border:0;background:transparent;color:var(--muted);font-size:24px;line-height:1;padding:6px}
+dl.facts{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0;font-size:14px}
+dl.facts dt{color:var(--muted)}
+dl.facts dd{margin:0;min-width:0}
+.sec{font-family:var(--mono);font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:6px 0 0}
+ul.branches{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+ul.branches li{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;border-top:1px solid var(--line)}
+ul.branches li:first-child{border-top:0}
+ul.branches .nm{font-weight:600}
+ul.branches .ad{font-size:13px;color:var(--muted)}
+ul.branches li.mine{background:color-mix(in oklab,var(--accent) 10%,transparent)}
+.actions{display:flex;flex-wrap:wrap;gap:8px}
+.actions a{text-decoration:none}
+.note{font-size:12px;color:var(--muted)}
+/* watchlist panel */
+.wlpanel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px;margin-block:4px 16px}
+.wlpanel textarea{font:inherit;font-size:14px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;min-height:110px;resize:vertical;width:100%}
+.wlpanel .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.foot{padding-block:8px 40px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;display:flex;flex-direction:column;gap:6px}
+.foot p{margin:0;max-width:80ch}
+@media (prefers-reduced-motion:reduce){.case{transition:none}.card:hover .case{transform:none}}
+</style>
+</head>
+<body>
+
+<header class="wrap top">
+  <div>
+    <div class="stamp">Biblioteka Raczyńskich · Poznań · filmy na płytach</div>
+    <h1>Półka <span>Raczyńskich</span></h1>
+    <p class="lede">Filmy na płytach z katalogu Biblioteki Raczyńskich w jednym miejscu. Wybierz swoją filię i zobacz, co dziś stoi na półce.</p>
+  </div>
+  <div class="stamp" id="harvested"></div>
+</header>
+
+<div class="bar"><div class="wrap">
+  <input type="search" id="q" placeholder="Tytuł, reżyser, gatunek…" aria-label="Szukaj">
+  <select id="branch" aria-label="Twoja filia"><option value="">Wszystkie filie</option></select>
+  <select id="sort" aria-label="Sortowanie">
+    <option value="year">Najnowsze</option>
+    <option value="avail">Najwięcej dostępnych</option>
+    <option value="title">Tytuł A–Z</option>
+  </select>
+  <label class="toggle"><input type="checkbox" id="onlyAvail"> Na półce teraz</label>
+  <button class="btn" id="wlBtn" aria-expanded="false">Moja lista</button>
+</div></div>
+
+<main class="wrap">
+  <section class="wlpanel" id="wlPanel" hidden>
+    <strong>Sprawdź swoją listę filmów</strong>
+    <span class="note">Wklej tytuły, po jednym w wierszu (np. z eksportu Letterboxd lub IMDb). Pokażę, które z nich ma biblioteka.</span>
+    <textarea id="wlText" placeholder="Diuna&#10;Oppenheimer&#10;Chłopi"></textarea>
+    <div class="row">
+      <button class="btn primary" id="wlApply">Pokaż pasujące</button>
+      <button class="btn" id="wlClear">Wyczyść</button>
+      <span class="note" id="wlInfo"></span>
+    </div>
+  </section>
+  <div class="meta" id="meta"></div>
+  <div class="chips" id="chips" role="group" aria-label="Gatunki"></div>
+  <div class="grid" id="grid"></div>
+  <div class="more"><button class="btn" id="moreBtn" hidden>Pokaż więcej</button></div>
+</main>
+
+<footer class="wrap foot">
+  <p>Dane: katalog Biblioteki Raczyńskich, odświeżane co noc. Dostępność może się zmienić w ciągu dnia, przed wyjściem sprawdź ją w katalogu.</p>
+  <p>Plakaty, oceny i opisy pochodzą z TMDB. Ta strona korzysta z API TMDB, ale nie jest przez TMDB wspierana ani certyfikowana. Nie jest też oficjalną stroną biblioteki.</p>
+</footer>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="sheet" id="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="sTitle"></aside>
+
+<script type="module">
+let DATA;
+try { DATA = await (await fetch('films.json', {cache:'no-cache'})).json(); }
+catch (e) { document.getElementById('grid').innerHTML = '<div class="empty">Nie udało się wczytać listy filmów. Odśwież stronę za chwilę.</div>'; throw e; }
+const CAT = 'https://omnis-br.primo.exlibrisgroup.com/discovery/fulldisplay?vid=48OMNIS_BRP:BRACZ&docid=alma';
+const LIBS = DATA.libs;
+const recs = DATA.recs.map(r => ({...r, nAvail: r.h.filter(h => h[1]).length, key: norm(r.t + ' ' + (r.o||''))}));
+const libName = c => { const [m,s] = (LIBS[c]||'|').split('|'); return {name: c==='WYPOZ' ? 'Wypożyczalnia Główna' : /^F\d+/.test(c) ? 'Filia ' + c.replace(/^F0?/,'') : (m||c), addr: s || m || ''}; };
+function norm(s){return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ł/g,'l').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();}
+const $ = id => document.getElementById(id);
+const store = { get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}} };
+
+// covers: deterministic color from genre + title
+const GENRE_HUE = {'Dramat filmowy':212,'Film akcji':8,'Kryminał':262,'Science fiction':188,'Fantasy':285,'Komediodramat':44,'Dystopia':120,'Body horror':345,'Musical filmowy':305,'Serial filmowy':232,'Film kostiumowy':30,'Dramat historyczny':35,'Film animowany':28,'Film familijny':42,'Komedia':50,'Dramat':215,'Film obyczajowy':200,'Thriller':350,'Horror':0,'Film kryminalny':260,'Film sensacyjny':12,'Film przygodowy':150,'Film fantastyczny':280,'Film science fiction':190,'Film dokumentalny':95,'Film biograficzny':170,'Film historyczny':35,'Film wojenny':80,'Romans':330,'Melodramat':320,'Musical':300};
+function hash(s){let h=2166136261;for(const c of s){h^=c.charCodeAt(0);h=Math.imul(h,16777619)}return h>>>0}
+function coverStyle(r){
+  const g = r.g.find(x => GENRE_HUE[x] !== undefined); const base = g ? GENRE_HUE[g] : hash(r.t)%360;
+  const h = (base + (hash(r.id)%24) - 12 + 360) % 360, h2 = (h + 28) % 360, v = hash(r.t)%3;
+  const bg = v===0 ? `linear-gradient(160deg,hsl(${h} 55% 38%),hsl(${h2} 60% 22%))`
+           : v===1 ? `radial-gradient(120% 90% at 85% 10%,hsl(${h2} 65% 48%),hsl(${h} 55% 24%) 70%)`
+           : `linear-gradient(180deg,hsl(${h} 45% 30%) 0 62%,hsl(${h2} 70% 52%) 62% 64%,hsl(${h} 50% 20%) 64%)`;
+  return bg;
+}
+
+// filters
+const state = { q:'', branch: store.get('branch')||'', sort:'year', onlyAvail:false, genre:'', watch:null, shown:60 };
+const genreCount = {}; recs.forEach(r => r.g.forEach(g => genreCount[g]=(genreCount[g]||0)+1));
+const topGenres = Object.entries(genreCount).sort((a,b)=>b[1]-a[1]).slice(0,12).map(e=>e[0]);
+$('chips').innerHTML = ['Wszystkie',...topGenres].map(g => `<button class="chip" data-g="${g==='Wszystkie'?'':g}" aria-pressed="${g==='Wszystkie'}">${g.replace(/^Film /,'')}</button>`).join('');
+const branchCodes = Object.keys(LIBS).sort((a,b)=> (a==='WYPOZ'?-1:b==='WYPOZ'?1:(parseInt(a.slice(1))||999)-(parseInt(b.slice(1))||999)));
+$('branch').innerHTML += branchCodes.map(c => { const l=libName(c); return `<option value="${c}">${l.name}${l.addr?' – '+l.addr:''}</option>`; }).join('');
+$('branch').value = state.branch;
+$('harvested').textContent = 'Stan katalogu: ' + new Date(DATA.harvestedAt).toLocaleString('pl-PL',{dateStyle:'medium',timeStyle:'short'});
+
+function availAt(r){ return state.branch ? r.h.filter(h => h[0]===state.branch) : r.h; }
+function filtered(){
+  const q = norm(state.q);
+  let list = recs.filter(r => {
+    if (state.genre && !r.g.includes(state.genre)) return false;
+    if (state.watch && !state.watch.has(r.id)) return false;
+    const at = availAt(r);
+    if (state.branch && !at.length) return false;
+    if (state.onlyAvail && !at.some(h=>h[1])) return false;
+    if (q && !(r.key.includes(q) || norm(r.d.join(' ')).includes(q) || norm(r.g.join(' ')).includes(q))) return false;
+    return true;
+  });
+  const av = r => availAt(r).filter(h=>h[1]).length;
+  list.sort(state.sort==='title' ? (a,b)=>a.t.localeCompare(b.t,'pl') : state.sort==='avail' ? (a,b)=>av(b)-av(a)||b.y-a.y : (a,b)=>(b.y||0)-(a.y||0)||a.t.localeCompare(b.t,'pl'));
+  return list;
+}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function render(){
+  const list = filtered();
+  const at = r => availAt(r);
+  const totalAvail = list.filter(r => at(r).some(h=>h[1])).length;
+  $('meta').innerHTML = `<span><b>${list.length}</b> ${list.length===1?'film':'filmów'}</span><span><b>${totalAvail}</b> dostępnych ${state.branch?'w '+esc(libName(state.branch).name):'w co najmniej jednej filii'}</span>`;
+  $('grid').innerHTML = list.length ? list.slice(0,state.shown).map(r => {
+    const a = at(r), n = a.filter(h=>h[1]).length;
+    const pill = n ? `<span class="pill ok">${state.branch ? 'Na półce' : n + ' ' + (n===1?'filia':(n<5?'filie':'filii'))}</span>` : `<span class="pill no">Wypożyczony</span>`;
+    return `<button class="card" data-id="${r.id}" aria-label="${esc(r.t)}">
+      <div class="case${r.tmdb?.poster?' has-poster':''}"><div class="art" style="background:${coverStyle(r)}"></div>${r.tmdb?.poster?`<img class="poster" src="${r.tmdb.poster}" alt="" loading="lazy" onerror="this.parentNode.classList.remove('has-poster');this.remove()">`:''}
+        ${state.watch?'<span class="wl">Z listy</span>':''}<span class="fmt">${r.f}</span>
+        <div class="txt"><span></span><span class="ttl">${esc(r.t)}</span><span class="yr">${esc(r.y||'')}${r.c[0]?' · '+esc(r.c[0]):''}</span></div></div>
+      <div class="under"><span class="dir">${esc(r.d[0]||r.g[0]||'')}</span>${pill}</div></button>`;
+  }).join('') : `<div class="empty">Nic nie pasuje do tych filtrów. Spróbuj innej filii albo wyłącz „Na półce teraz”.</div>`;
+  $('moreBtn').hidden = list.length <= state.shown;
+}
+
+let lastFocus = null;
+function openSheet(id){
+  const r = recs.find(x=>x.id===id); if(!r) return;
+  lastFocus = document.activeElement;
+  const sorted = [...r.h].sort((a,b)=> (b[0]===state.branch)-(a[0]===state.branch) || b[1]-a[1]);
+  const yt = 'https://www.youtube.com/results?search_query=' + encodeURIComponent((r.o||r.t) + ' ' + (r.y||'') + ' zwiastun');
+  $('sheet').innerHTML = `<button class="close" id="sClose" aria-label="Zamknij">×</button>
+    <div><h2 id="sTitle">${esc(r.t)}</h2>${r.o?`<p class="orig">${esc(r.o)}</p>`:''}</div>
+    <dl class="facts">
+      ${r.d.length?`<dt>Reżyseria</dt><dd>${esc(r.d.join(', '))}</dd>`:''}
+      <dt>Rok</dt><dd>${esc(r.y||'—')}</dd>
+      ${r.tmdb?.rating&&r.tmdb.votes>=20?`<dt>Ocena</dt><dd>${r.tmdb.rating.toFixed(1)} / 10 <span class="note">(TMDB, ${r.tmdb.votes} głosów)</span></dd>`:''}
+      ${r.c.length?`<dt>Kraj</dt><dd>${esc(r.c.join(', '))}</dd>`:''}
+      ${r.g.length?`<dt>Gatunek</dt><dd>${esc(r.g.join(', '))}</dd>`:''}
+      ${r.a?`<dt>Dla kogo</dt><dd>${esc(r.a)}</dd>`:''}
+      <dt>Nośnik</dt><dd>${r.f==='BD'?'Blu-ray':'DVD'} · wypożyczenie na 14 dni</dd>
+    </dl>
+    ${r.tmdb?.overview?`<p style="margin:0">${esc(r.tmdb.overview)}</p>`:''}
+    <p class="sec">Gdzie stoi (${r.h.length} egz.)</p>
+    <ul class="branches">${sorted.map(([c,ok]) => { const l=libName(c); return `<li class="${c===state.branch?'mine':''}"><div><div class="nm">${esc(l.name)}</div><div class="ad">${esc(l.addr)}</div></div><span class="pill ${ok?'ok':'no'}">${ok?'Na półce':'Wypożyczony'}</span></li>`; }).join('')}</ul>
+    <div class="actions">
+      <a class="btn primary" href="${CAT}${r.id}" target="_blank" rel="noopener">Zarezerwuj w katalogu</a>
+      <a class="btn" href="${yt}" target="_blank" rel="noopener">Zwiastun</a>
+    </div>
+    <p class="note">Dostępność według stanu katalogu z chwili pobrania danych. Rezerwacja wymaga zalogowania w katalogu biblioteki.</p>`;
+  $('sheet').hidden = false; $('scrim').hidden = false; $('sClose').focus();
+  $('sClose').onclick = closeSheet;
+}
+function closeSheet(){ $('sheet').hidden = true; $('scrim').hidden = true; if (lastFocus) lastFocus.focus(); }
+$('scrim').onclick = closeSheet;
+document.addEventListener('keydown', e => { if (e.key==='Escape' && !$('sheet').hidden) closeSheet(); });
+
+$('grid').addEventListener('click', e => { const c = e.target.closest('.card'); if (c) openSheet(c.dataset.id); });
+$('chips').addEventListener('click', e => { const b = e.target.closest('.chip'); if(!b) return; state.genre = b.dataset.g; document.querySelectorAll('.chip').forEach(x=>x.setAttribute('aria-pressed', x===b)); state.shown=60; render(); });
+$('q').addEventListener('input', e => { state.q = e.target.value; state.shown=60; render(); });
+$('branch').addEventListener('change', e => { state.branch = e.target.value; store.set('branch', state.branch); state.shown=60; render(); });
+$('sort').addEventListener('change', e => { state.sort = e.target.value; render(); });
+$('onlyAvail').addEventListener('change', e => { state.onlyAvail = e.target.checked; state.shown=60; render(); });
+$('moreBtn').addEventListener('click', () => { state.shown += 60; render(); });
+$('wlBtn').addEventListener('click', () => { const p=$('wlPanel'); p.hidden=!p.hidden; $('wlBtn').setAttribute('aria-expanded', !p.hidden); if(!p.hidden) $('wlText').focus(); });
+$('wlApply').addEventListener('click', () => {
+  const lines = $('wlText').value.split(/\n/).map(l => norm(l.split(',')[0].replace(/\(\d{4}\)/,''))).filter(l => l.length > 1);
+  if (!lines.length) { $('wlInfo').textContent = 'Wklej co najmniej jeden tytuł.'; return; }
+  const hit = new Set();
+  lines.forEach(l => recs.forEach(r => { const t = norm(r.t), o = norm(r.o||''); if (t===l || o.startsWith(l) || t.startsWith(l+' ') ) hit.add(r.id); }));
+  state.watch = hit; state.shown = 60;
+  $('wlInfo').textContent = `Biblioteka ma ${hit.size} z ${lines.length} tytułów z listy.`;
+  render();
+});
+$('wlClear').addEventListener('click', () => { state.watch=null; $('wlText').value=''; $('wlInfo').textContent=''; render(); });
+render();
+</script>
+</body>
+</html>
