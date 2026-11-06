@@ -1,0 +1,60 @@
+name: Odśwież półkę
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['site/index.html', 'harvester/**', '.github/workflows/**']
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Pobierz filmy z katalogu Biblioteki Raczyńskich
+        run: node harvester/harvest.mjs 2000 "$(date +%Y)" > films.json
+
+      - name: Przywróć cache okładek
+        uses: actions/cache@v4
+        with:
+          path: tmdb-cache.json
+          key: tmdb-${{ github.run_id }}
+          restore-keys: tmdb-
+
+      - name: Dociągnij okładki z TMDB
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: node harvester/enrich-tmdb.mjs films.json tmdb-cache.json > site/films.json
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
