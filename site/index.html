@@ -383,6 +383,11 @@ async function load(mode){
   d.minY = ys.length ? Math.min(...ys) : 1900; d.maxY = ys.length ? Math.max(...ys) : new Date().getFullYear();
   d.hasDates = d.recs.some(r => r.n);
   d.hasPop = d.recs.some(r => r.pu > 0);
+  // Względna popularność 0–100: ta sama liczba, po której sortuje „Najpopularniejsze” (100 = najpopularniejsza płyta w katalogu)
+  if (mode === 'music') {
+    const maxPop = Math.max(0, ...d.recs.map(r => r.pop));
+    for (const r of d.recs) r.popRel = r.pu > 0 && maxPop > 0 ? Math.max(0, Math.round(100 * r.pop / maxPop)) : null;
+  }
   d.newCount = d.recs.filter(r => r.isNew).length;
   return cache[mode] = d;
 }
@@ -483,7 +488,7 @@ function card(r){
   const M = MODES[state.mode], a = availAt(r), n = a.filter(h=>h[1]).length, isFav = favs[state.mode].has(r.id);
   const pill = n ? `<span class="pill ok">${state.branch ? 'Na półce' : n + ' ' + plural(n,'filia','filie','filii')}</span>` : `<span class="pill no">${M.status[1]}</span>`;
   const img = r.img;
-  const tl = rateBadge(r) + (r.isNew?'<span class="badge new">Nowość</span>':'');
+  const tl = rateBadge(r) + popBadge(r) + (r.isNew?'<span class="badge new">Nowość</span>':'');
   return `<article class="card" data-id="${r.id}">
     <button class="fav" data-fav="${r.id}" aria-pressed="${isFav}" aria-label="${isFav?'Usuń z ulubionych':'Dodaj do ulubionych'}: ${esc(r.t)}">${HEART}</button>
     <button class="open" aria-label="${esc(r.t)}${r.d[0]?', '+esc(r.d[0]):''}${r.isNew?', nowość':''}">
@@ -496,6 +501,11 @@ function card(r){
 // Ocena z TMDB na kafelku: „★ 8.7 (28 tys.)”; przy mniej niż RATING.minVotes głosach bez gwiazdki i wyszarzona.
 const fmtVotes = n => new Intl.NumberFormat('pl-PL', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 const LOW_VOTES = `Za mało głosów w TMDB (mniej niż ${RATING.minVotes}), ocena niewiarygodna`;
+const popTitle = r => `Popularność ${r.popRel}/100 względem najpopularniejszej płyty w katalogu: ${r.pu.toLocaleString('pl-PL')} ${plural(r.pu,'słuchacz','słuchaczy','słuchaczy')} w ListenBrainz`
+  + (MINOR.test(r.tp || '') ? ', obniżona, bo to koncertówka, składanka lub remiks' : '');
+function popBadge(r){
+  return r.popRel == null ? '' : `<span class="badge rate pop" title="${esc(popTitle(r))}">♫ ${r.popRel} <span class="vc">(${fmtVotes(r.pu)})</span></span>`;
+}
 function rateBadge(r){
   if (!r.tmdb?.rating || !r.votes) return '';
   const v = `<span class="vc">(${fmtVotes(r.votes)})</span>`;
@@ -569,6 +579,7 @@ function openSheet(id){
       ${r.a?`<dt>Dla kogo</dt><dd>${esc(r.a)}</dd>`:''}
       ${r.py?`<dt>${state.mode==='films'?(r.tmdb?.kind==='tv'?'Premiera serialu':'Premiera'):'Pierwsze wydanie'}</dt><dd>${esc(fmtPart(r.p))}</dd>`:''}
       ${typeName(r.tp)?`<dt>Rodzaj wydania</dt><dd>${esc(typeName(r.tp))}</dd>`:''}
+      ${r.popRel!=null?`<dt>Popularność</dt><dd>${r.popRel}/100 <span class="note" style="display:inline">względem najpopularniejszej płyty w katalogu${MINOR.test(r.tp||'')?'; obniżona (koncertówka, składanka lub remiks)':''}</span></dd>`:''}
       ${r.pu>0?`<dt>Słuchacze</dt><dd>${r.pu.toLocaleString('pl-PL')} w ListenBrainz</dd>`:''}
       ${r.py&&r.y&&Number(r.y)!==r.py?`<dt>Wydanie płyty</dt><dd>${esc(r.y)}</dd>`:''}
       ${r.n?`<dt>W katalogu od</dt><dd>${esc(fmtDate(r.n))}${r.isNew?' · nowość':''}</dd>`:''}
