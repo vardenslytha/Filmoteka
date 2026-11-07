@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['site/**', 'harvester/enrich-tmdb.mjs', 'harvester/enrich-music.mjs', '.github/workflows/publikuj.yml']
+    paths: ['site/**', 'harvester/enrich-tmdb.mjs', 'harvester/enrich-music.mjs', 'harvester/filmweb.mjs', '.github/workflows/publikuj.yml']
   schedule:
     - cron: '47 */6 * * *'   # zapas (cron w UTC)
 
@@ -21,6 +21,9 @@ permissions:
 
 env:
   NODE_VERSION: 20
+  # Profile Filmwebu, z których „Chcę zobaczyć” trafia na stronę: nick:Etykieta, po przecinku.
+  # Można nadpisać zmienną repozytorium FILMWEB_USERS (Settings → Secrets and variables → Actions → Variables).
+  FILMWEB_USERS: ${{ vars.FILMWEB_USERS || 'justyna_antokolska:Justyna' }}
 
 jobs:
   szybka:
@@ -72,6 +75,29 @@ jobs:
             [ -s "$k-raw.json" ] || curl -fsSL "$SITE_URL/$k.json" -o "$k-raw.json" || rm -f "$k-raw.json"
           done
           ls -la *-raw.json || true
+
+      - name: Przywróć cache Filmwebu
+        uses: actions/cache/restore@v4
+        with:
+          path: filmweb-cache.json
+          key: filmweb-${{ github.run_id }}
+          restore-keys: filmweb-
+      - name: Listy z Filmwebu
+        continue-on-error: true
+        run: |
+          SITE_URL="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}"
+          curl -fsSL "$SITE_URL/listy.json" -o listy-prev.json || rm -f listy-prev.json
+          if PREV=listy-prev.json node harvester/filmweb.mjs filmweb-cache.json > listy.json; then
+            mv listy.json site/listy.json
+          elif [ -s listy-prev.json ]; then
+            echo "Filmweb nie odpowiedział, zostają poprzednie listy."; cp listy-prev.json site/listy.json
+          fi
+      - name: Zapisz cache Filmwebu
+        if: ${{ always() && hashFiles('filmweb-cache.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: filmweb-cache.json
+          key: filmweb-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Nałóż okładki i daty z cache
         env:
@@ -144,6 +170,8 @@ jobs:
           for k in films music; do
             [ -s "$k-raw.json" ] || curl -fsSL "$SITE_URL/$k.json" -o "$k-raw.json" || rm -f "$k-raw.json"
           done
+          # listy z Filmwebu pobiera szybka publikacja; pełna publikacja bierze je z opublikowanej strony
+          curl -fsSL "$SITE_URL/listy.json" -o site/listy.json || rm -f site/listy.json
 
       - name: Filmy – TMDB (nowe dopasowania i daty premiery)
         id: films

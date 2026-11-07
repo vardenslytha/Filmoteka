@@ -52,6 +52,8 @@ input[type=search]{flex:1 1 220px}
 select{flex:0 1 auto;max-width:100%}
 .btn{border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:8px;padding:8px 14px;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn .count{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.btn.primary .count{color:inherit}
 .btn .dot{width:7px;height:7px;border-radius:50%;background:var(--accent)}
 .linkish{border:0;background:none;padding:0;color:var(--accent);text-decoration:underline;text-underline-offset:3px;font:inherit}
 
@@ -215,6 +217,11 @@ ul.branches li.mine{background:color-mix(in oklab,var(--accent) 12%,transparent)
 
   <section class="panel" id="wlPanel" hidden aria-label="Moja lista">
     <h3 id="wlHead">Sprawdź swoją listę filmów</h3>
+    <div id="fwBox" hidden>
+      <p class="sec">Z Filmwebu</p>
+      <div class="actions" id="fwLists"></div>
+      <p class="note" id="fwNote"></p>
+    </div>
     <div class="drop" id="drop">
       <label class="btn primary" for="wlFile">Wybierz plik CSV</label>
       <input type="file" id="wlFile" accept=".csv,text/csv" hidden>
@@ -408,6 +415,7 @@ async function switchMode(mode){
   const M = MODES[mode];
   ['tabFilms','tabMusic'].forEach(id => $(id).setAttribute('aria-selected', $(id).dataset.mode===mode));
   document.body.dataset.mode = mode;
+  renderFw();
   $('q').placeholder = M.search; $('wlHead').textContent = M.wlHead; $('wlText').placeholder = M.wlPh; $('wlInfo').textContent = '';
   $('wlHelp').hidden = $('drop').hidden = mode === 'music';
   $('rateField').hidden = mode === 'music';
@@ -438,7 +446,7 @@ async function switchMode(mode){
   $('chips').innerHTML = ['',...order].map(g => `<button class="chip" data-g="${esc(g)}" aria-pressed="${g===''}">${g?esc(g):'Wszystkie'}</button>`).join('');
   $('harvested').textContent = 'Stan katalogu: ' + new Date(DATA.harvestedAt).toLocaleString('pl-PL',{dateStyle:'medium',timeStyle:'short'})
     + (DATA.partial ? ` · odświeżanie w toku (${DATA.refreshed.toLocaleString('pl-PL')} pozycji z nowego przebiegu)` : '');
-  syncView(); syncFilterLabels(); render();
+  syncView(); syncFilterLabels(); renderFw(); render();
 }
 
 function availAt(r){ return state.branch ? r.h.filter(h => h[0]===state.branch) : r.h; }
@@ -602,7 +610,8 @@ function entriesFromCSV(text){
   if (ti < 0) return rows.map(r => ({t:r[0]}));
   return rows.slice(1).map(r => ({ t:r[ti], o: oi >= 0 ? r[oi] : '', y: yi >= 0 ? Number(r[yi]) || 0 : 0 })).filter(e => e.t);
 }
-function matchEntries(entries){
+function matchEntries(entries, label){
+  fwActive = '';
   const hit = new Set(); let found = 0;
   for (const e of entries) {
     const ks = [norm(e.t), norm(e.o)].filter(k => k.length > 1);
@@ -612,13 +621,14 @@ function matchEntries(entries){
       const titleHit = ks.some(k => k===t || k===o || t.startsWith(k+' ') || o.startsWith(k+' '));
       const whoHit = state.mode==='music' && ks.some(k => k.length > 3 && who.includes(k));
       // rok z eksportu to rok premiery; na płycie bywa rok wydania DVD, stąd tolerancja
-      const yearOk = !e.y || !r.yn || r.yn >= e.y - 1;
+      // gdy znamy rok premiery filmu z TMDB, porównujemy go wprost (inaczej „Joker” łapałby też „Joker: Folie à deux”)
+      const yearOk = !e.y || (r.py ? Math.abs(r.py - e.y) <= 1 : !r.yn || r.yn >= e.y - 1);
       if ((titleHit && yearOk) || whoHit) { hit.add(r.id); any = true; }
     }
     if (any) found++;
   }
   state.watch = hit; state.shown = 60; state.view = 'all'; syncView();
-  $('wlInfo').textContent = `Biblioteka ma ${found} z ${entries.length} pozycji z listy.`;
+  $('wlInfo').textContent = `Biblioteka ma ${found} z ${entries.length} pozycji z listy${label ? ' „' + label + '”' : ''}.`;
   render();
 }
 async function readFile(file){
@@ -678,9 +688,46 @@ $('wlApply').addEventListener('click', () => {
   if (!entries.length) { $('wlInfo').textContent = 'Wklej co najmniej jeden tytuł albo wybierz plik.'; return; }
   matchEntries(entries);
 });
-$('wlClear').addEventListener('click', () => { state.watch=null; $('wlText').value=''; $('wlFile').value=''; $('wlInfo').textContent=''; render(); });
+$('wlClear').addEventListener('click', () => { state.watch=null; $('wlText').value=''; $('wlFile').value=''; $('wlInfo').textContent=''; syncFw(); render(); });
+
+// ---------- listy z Filmwebu (site/listy.json, odświeżane przy publikacji) ----------
+let FW = null, fwActive = '';
+const FW_LISTS = [['want', 'do obejrzenia']];   // kolejne listy (np. obejrzane) dojdą tutaj
+async function loadFw(){
+  try { const res = await fetch('listy.json', {cache:'no-cache'}); if (res.ok) FW = await res.json(); } catch(e) {}
+  renderFw();
+}
+function fwEntries(key){
+  if (key === 'all') return FW.users.flatMap(u => u.lists.want || []);
+  const [nick, list] = key.split('|'); const u = FW.users.find(x => x.nick === nick);
+  return (u && u.lists[list]) || [];
+}
+function renderFw(){
+  const users = FW?.users || [];
+  $('fwBox').hidden = state.mode !== 'films' || !users.length;
+  if ($('fwBox').hidden) return;
+  const btns = users.flatMap(u => FW_LISTS.filter(([k]) => (u.lists[k] || []).length).map(([k, name]) =>
+    [`${u.nick}|${k}`, `${u.label}: ${name}`, u.lists[k].length]));
+  if (users.length > 1) btns.push(['all', 'Wszyscy: do obejrzenia', new Set(fwEntries('all').map(e => e.id)).size]);
+  $('fwLists').innerHTML = btns.map(([key, l, n]) => `<button class="btn" data-fw="${esc(key)}" aria-pressed="false">${esc(l)} <span class="count">${n}</span></button>`).join('');
+  $('fwNote').textContent = 'Z publicznych profili Filmwebu, stan z ' + new Date(FW.updatedAt).toLocaleString('pl-PL', {dateStyle:'medium', timeStyle:'short'})
+    + (users.some(u => u.stale) ? ' (część list z poprzedniego odświeżenia)' : '') + '.';
+  syncFw();
+}
+function syncFw(){
+  if (!state.watch) fwActive = '';
+  $('fwLists').querySelectorAll('button').forEach(b => { const on = b.dataset.fw === fwActive; b.setAttribute('aria-pressed', on); b.classList.toggle('primary', on); });
+}
+$('fwLists').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (fwActive === b.dataset.fw) { state.watch = null; $('wlInfo').textContent = ''; fwActive = ''; syncFw(); render(); return; }
+  const key = b.dataset.fw, seen = new Set(), entries = fwEntries(key).filter(x => !seen.has(x.id) && seen.add(x.id));
+  matchEntries(entries, b.firstChild.textContent.trim());
+  fwActive = key; syncFw();
+});
 window.addEventListener('hashchange', () => { const m = location.hash==='#muzyka' ? 'music' : 'films'; if (m!==state.mode) switchMode(m); });
 switchMode(state.mode);
+loadFw();
 </script>
 </body>
 </html>
