@@ -132,8 +132,13 @@ async function match(r) {
     }
     return null;
   }
-  // pierwsza pasująca grupa z okładką; jeśli żadna nie ma okładki, zapamiętujemy samo dopasowanie
-  const meta = (g) => ({ date: g['first-release-date'] || '', types: typesOf(g), title: g.title || '' });
+  return cands;
+}
+
+// Pierwsza pasująca grupa z okładką; jeśli żadna nie ma okładki, zapamiętujemy samo dopasowanie.
+// Cover Art Archive nie ma limitu MusicBrainz, więc sprawdzamy okładki równolegle z kolejnymi zapytaniami do MusicBrainz.
+const meta = (g) => ({ date: g['first-release-date'] || '', types: typesOf(g), title: g.title || '' });
+async function pickCover(cands) {
   for (const g of cands.slice(0, 2)) if (await hasCover(g.id)) return { rg: g.id, cover: `${CAA_PUBLIC}/release-group/${g.id}/front-250`, ...meta(g) };
   return { rg: cands[0].id, cover: null, ...meta(cands[0]) };
 }
@@ -161,8 +166,21 @@ const todo = data.recs.filter((r) => {
 }).sort((a, b) => b.h.length - a.h.length || Number(b.y || 0) - Number(a.y || 0)); // najpierw płyty z największą liczbą egzemplarzy
 
 let asked = 0, hits = 0, covers = 0, failures = 0, dated = 0;
+const COVER_PARALLEL = 4;          // ile sprawdzeń okładek naraz czeka w tle
+const pending = new Set();
+const fail = (r, e) => { failures++; log(`${r.t}: ${e.message}\n`); };
+function save(r, m) {
+  asked++;
+  const c = m ? { v: MATCH_VERSION, mv: MATCHER, at: now, rg: m.rg, cover: m.cover, date: m.date, types: m.types, title: m.title }
+    : { v: MATCH_VERSION, mv: MATCHER, at: now, miss: true };
+  cache[r.id] = c; touch();
+  if (m) { hits++; if (m.cover) covers++; }
+  apply(r, c);
+  if (asked % 200 === 0) log(`[${((Date.now() - started) / 60000).toFixed(1)} min] sprawdzone ${asked}/${todo.length} · dopasowane ${hits} · z okładką ${covers}\n`);
+}
 for (const r of todo) {
   if (outOfTime()) break;
+  if (failures > 30) { log('Za dużo błędów MusicBrainz, kończę tę porcję.\n'); break; }
   try {
     if (needsDate(cache[r.id])) {
       const g = await mb(`/ws/2/release-group/${encodeURIComponent(cache[r.id].rg)}?fmt=json`);
@@ -172,20 +190,14 @@ for (const r of todo) {
       dated++; touch(); apply(r, cache[r.id]);
       continue;
     }
-    const m = await match(r);
-    asked++;
-    const c = m ? { v: MATCH_VERSION, mv: MATCHER, at: now, rg: m.rg, cover: m.cover, date: m.date, types: m.types, title: m.title }
-      : { v: MATCH_VERSION, mv: MATCHER, at: now, miss: true };
-    cache[r.id] = c; touch();
-    if (m) { hits++; if (m.cover) covers++; }
-    apply(r, c);
-  } catch (e) {
-    failures++;
-    log(`${r.t}: ${e.message}\n`);
-    if (failures > 30) { log('Za dużo błędów MusicBrainz, kończę tę porcję.\n'); break; }
-  }
-  if (asked % 200 === 0 && asked) log(`[${((Date.now() - started) / 60000).toFixed(1)} min] sprawdzone ${asked}/${todo.length} · dopasowane ${hits} · z okładką ${covers}\n`);
+    const cands = await match(r);
+    if (!cands) { save(r, null); continue; }
+    while (pending.size >= COVER_PARALLEL) await Promise.race(pending);
+    const p = pickCover(cands).then((m) => save(r, m), (e) => fail(r, e)).finally(() => pending.delete(p));
+    pending.add(p);
+  } catch (e) { fail(r, e); }
 }
+await Promise.all(pending);
 
 saveCache();
 

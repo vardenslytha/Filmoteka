@@ -1,7 +1,7 @@
 name: Wzbogać i opublikuj
 
 # 1) szybko: dane z katalogu + to, co już jest w cache TMDB i MusicBrainz → strona (ok. 2 min)
-# 2) potem: nowe dopasowania TMDB, okładki, daty i rodzaje wydań z MusicBrainz (do 35 min), popularność z ListenBrainz (do 8 min) → strona jeszcze raz
+# 2) potem: nowe dopasowania TMDB, okładki, daty i rodzaje wydań z MusicBrainz (do 50 min), popularność z ListenBrainz (do 8 min) → strona jeszcze raz
 # Zmiana strony (site/**) albo skryptów wzbogacania publikuje się więc od razu, bez czekania na katalog.
 # Dopóki zostały płyty do sprawdzenia w MusicBrainz, przebieg zamawia następny.
 
@@ -98,7 +98,7 @@ jobs:
     needs: szybka
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 70
     concurrency:
       group: wzbogacanie
       cancel-in-progress: false
@@ -158,7 +158,7 @@ jobs:
         id: music
         continue-on-error: true
         env:
-          MB_MINUTES: '35'
+          MB_MINUTES: '50'
           LB_MINUTES: '8'
         run: |
           [ -s music-raw.json ] || { echo "Brak danych muzyki."; exit 0; }
