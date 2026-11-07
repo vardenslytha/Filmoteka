@@ -248,7 +248,7 @@ const CAT = 'https://omnis-br.primo.exlibrisgroup.com/discovery/fulldisplay?vid=
 const NEW_DAYS = 30;
 // Oceny TMDB. Sortowanie „Najwyżej oceniane” liczy ocenę ważoną (wzór IMDb):
 // WR = v/(v+m)·R + m/(v+m)·C, gdzie C to średnia ocena całego katalogu. Tytuł z kilkoma głosami ląduje blisko średniej.
-const RATING = { m: 200, minVotes: 10 };   // m: próg głosów; poniżej minVotes ocena jest niewiarygodna (bez gwiazdki)
+const RATING = { m: 200, minVotes: 10, checkYearMaxVotes: 500 };   // m: próg głosów; poniżej minVotes ocena jest niewiarygodna (bez gwiazdki)
 const $ = id => document.getElementById(id);
 $('rNote').textContent = `Według TMDB, tylko filmy z co najmniej ${RATING.minVotes} głosami.`;
 const store = { get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}} };
@@ -337,9 +337,9 @@ function migrateFavs(recs){
 function reportSuspicious(recs){
   const rows = recs.filter(r => r.tmdb).map(r => ({ tytuł: r.t, płyta: Number(r.y) || '', tmdb: r.py || '', różnica: r.py && Number(r.y) ? Number(r.y) - r.py : '',
       głosy: r.tmdb.votes || 0, ocena: r.tmdb.rating ?? '', link: `https://www.themoviedb.org/${r.tmdb.kind}/${r.tmdb.id}` }))
-    .filter(x => x.głosy < RATING.minVotes || (x.różnica !== '' && Math.abs(x.różnica) > 1));
+    .filter(x => x.głosy < RATING.minVotes || (x.różnica !== '' && Math.abs(x.różnica) > 1 && x.głosy < RATING.checkYearMaxVotes));
   if (!rows.length) return;
-  console.groupCollapsed(`Filmoteka: ${rows.length} ${plural(rows.length,'dopasowanie','dopasowania','dopasowań')} TMDB do sprawdzenia (głosy < ${RATING.minVotes} albo rok różny o > 1)`);
+  console.groupCollapsed(`Filmoteka: ${rows.length} ${plural(rows.length,'dopasowanie','dopasowania','dopasowań')} TMDB do sprawdzenia (głosy < ${RATING.minVotes} albo rok różny o > 1 przy < ${RATING.checkYearMaxVotes} głosach)`);
   console.table(rows.sort((a, b) => a.głosy - b.głosy || Math.abs(b.różnica || 0) - Math.abs(a.różnica || 0)));
   console.groupEnd();
 }
