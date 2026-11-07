@@ -34,12 +34,22 @@ const surname = (n) => norm(n).split(' ').pop();
 const baseTitle = (t) => (t || '').replace(/\s*[\[(].*?[\])]\s*/g, ' ').split(/\s*[:;]\s+/)[0].trim();
 const phrase = (s) => '"' + s.replace(/[\\"]/g, '\\$&') + '"';
 
+// Zerwane połączenie (np. „fetch failed”) ponawiamy kilka razy, zanim uznamy płytę za błąd.
+async function get(url, opts, tries = 0) {
+  try { return await fetch(url, opts); }
+  catch (e) {
+    if (tries >= 3) { const err = new Error(`${e.message}${e.cause?.code ? ' (' + e.cause.code + ')' : ''} – ${new URL(url).host}`); throw err; }
+    await sleep(2000 * (tries + 1));
+    return get(url, opts, tries + 1);
+  }
+}
+
 let lastMb = 0;
 async function mb(path, tries = 0) {
   const wait = lastMb + MB_GAP_MS - Date.now();
   if (wait > 0) await sleep(wait);
   lastMb = Date.now();
-  const res = await fetch(`${MB}${path}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+  const res = await get(`${MB}${path}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
   if ((res.status === 503 || res.status === 429) && tries < 4) { await sleep(3000 * (tries + 1)); return mb(path, tries + 1); }
   if (!res.ok) throw new Error(`MusicBrainz HTTP ${res.status}`);
   return res.json();
@@ -47,7 +57,7 @@ async function mb(path, tries = 0) {
 
 // Czy Cover Art Archive ma okładkę grupy wydań? Istniejąca okładka odpowiada przekierowaniem do archive.org.
 async function hasCover(rg) {
-  const res = await fetch(`${CAA}/release-group/${rg}/front-250`, { method: 'HEAD', redirect: 'manual', headers: { 'User-Agent': UA } });
+  const res = await get(`${CAA}/release-group/${rg}/front-250`, { method: 'HEAD', redirect: 'manual', headers: { 'User-Agent': UA } });
   if (res.status >= 300 && res.status < 400) return true;
   if (res.status === 200) return true;
   if (res.status === 404) return false;
