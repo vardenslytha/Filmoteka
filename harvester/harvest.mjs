@@ -15,11 +15,15 @@ const TERMS = MUSIC
   ? ['muzyka OR wykonanie OR i OR cd OR w OR the OR z']
   : ['film OR reżyseria OR i OR dvd OR w OR na OR z'];
 const PAGE = 100;          // 100 wyników trwa tyle co 50, więc o połowę mniej zapytań
-const OFFSET_LIMIT = 1900; // Primo odrzuca offset powyżej ~2000
-// Katalog ogranicza tempo zapytań z jednego IP: przy ok. 17 stronach/min po ~3 minutach zaczyna zwracać
-// 401 i puste wyniki; po kolei (~7/min) działa bez końca. Zaczynamy od 2 naraz i schodzimy do 1 przy pierwszej blokadzie.
-const START_CONCURRENCY = 2;
-const DELAY_MS = Number(process.env.DELAY_MS || 1000);  // przerwa po każdej stronie
+// Gość widzi najwyżej 500 wyników jednego wyszukiwania (dalej: 401 „Restricted offset for guest users”).
+const GUEST_MAX = 500;
+// Przedział z większą liczbą wyników dzielimy na wyszukiwania po pierwszej literze tytułu.
+// Polskie litery są osobno („s” ≠ „ś”), cyfry też.
+const LETTERS = [...'abcdefghijklmnopqrstuvwxyz0123456789', 'ć', 'ł', 'ó', 'ś', 'ź', 'ż'];
+// Przeciążony katalog ucina zapytanie po ~30 s i zwraca pustą listę. Po jednym zapytaniu naraz
+// (jak w jedynym w pełni udanym przebiegu) katalog odpowiada w ~8 s. Można podnieść zmienną CONCURRENCY.
+const START_CONCURRENCY = Number(process.env.CONCURRENCY || 1);
+const DELAY_MS = Number(process.env.DELAY_MS || 500);   // przerwa po każdej stronie
 const THROTTLE_PAUSE_MS = Number(process.env.THROTTLE_PAUSE_MS || 60_000); // przerwa po blokadzie (rośnie przy kolejnych)
 const MAX_REQUEUE = 5;        // tyle razy ponawiamy jedną stronę, zanim ją pominiemy
 
@@ -42,19 +46,19 @@ async function guestJwt() {
   return (await res.text()).replace(/"/g, '');
 }
 
-async function search(jwt, { term, from, to, offset }) {
+async function search(jwt, { term, from, to, offset, prefix }) {
   const params = new URLSearchParams({
     inst: INST, vid: VID, tab: 'LibraryCatalog', scope: 'MyInstitution2', lang: 'pl',
     limit: String(PAGE), offset: String(offset),
     sort: 'title', // stała kolejność; "rank" potrafi się przetasować między zapytaniami
     getMore: '0', pcAvailability: 'false', skipDelivery: 'N', rtaLinks: 'true', disableCache: 'false',
-    q: `any,contains,${term}`,
+    q: prefix ? `any,contains,${term},AND;title,begins_with,${prefix}` : `any,contains,${term}`,
     qInclude: `facet_rtype,exact,${RTYPE}|,|facet_searchcreationdate,exact,[${from} TO ${to}]`,
   });
   const res = await fetch(`${HOST}/primaws/rest/pub/pnxs?${params}`, {
     headers: { Authorization: `Bearer ${jwt}` },
   });
-  if (!res.ok) { const e = new Error(`pnxs HTTP ${res.status} (${from}-${to} @${offset})`); e.status = res.status; throw e; }
+  if (!res.ok) { const e = new Error(`pnxs HTTP ${res.status} (${from}-${to}${prefix ? ' ' + prefix + '…' : ''} @${offset})`); e.status = res.status; throw e; }
   return res.json();
 }
 
@@ -261,6 +265,8 @@ async function main() {
   for (const [from, to] of yearRanges(lastYear)) for (const term of TERMS) queue.push({ term, from, to, offset: 0, tries: 0 });
   pagesKnown = queue.length;
 
+  const label = (t) => `${t.from === t.to ? t.from : t.from + '-' + t.to}${t.prefix ? ' „' + t.prefix + '…”' : ''}`;
+
   async function throttled(task, why) {
     throttles++;
     const pause = Math.min(THROTTLE_PAUSE_MS * 2 ** Math.min(throttles - 1, 3), 8 * 60_000);
@@ -269,11 +275,11 @@ async function main() {
     task.tries++;
     if (task.tries > MAX_REQUEUE) {
       errors++;
-      log(`[${mins()} min] POMINIĘTO ${task.from}-${task.to} @${task.offset} po ${MAX_REQUEUE} próbach (${why})\n`);
+      log(`[${mins()} min] POMINIĘTO ${label(task)} @${task.offset} po ${MAX_REQUEUE} próbach (${why})\n`);
       if (errors > 40) throw new Error('Za dużo pominiętych stron, przerywam.');
       return;
     }
-    log(`[${mins()} min] katalog ogranicza tempo (${why}); przerwa ${pause / 1000} s, dalej po jednym zapytaniu\n`);
+    log(`[${mins()} min] katalog nie odpowiedział (${why}); przerwa ${pause / 1000} s, potem ponawiam tę stronę\n`);
     queue.unshift(task);             // ta sama strona wraca na początek kolejki
     try { jwt = await guestJwt(); } catch {}
   }
@@ -289,13 +295,13 @@ async function main() {
       throw e;
     }
     if (json.errorCode) {
-      log(`[${mins()} min] katalog odpowiedział: ${json.errorMessage || json.errorCode} (${task.from}-${task.to} @${task.offset})\n`);
+      log(`[${mins()} min] katalog odpowiedział: ${json.errorMessage || json.errorCode} (${label(task)} @${task.offset})\n`);
       pagesDone++;
       return;
     }
     const total = json.info?.total ?? 0;
     const n = (json.docs || []).length;
-    const sk = `${task.from}-${task.to}|${task.term}`;
+    const sk = `${task.from}-${task.to}|${task.term}|${task.prefix || ''}`;
     const known = sliceTotal.get(sk);
     // Pusta odpowiedź tam, gdzie wcześniej były wyniki = blokada, nie koniec danych.
     if (task.offset > 0 && (total === 0 || n === 0)) return throttled(task, 'pusta strona w środku wyników');
@@ -307,14 +313,20 @@ async function main() {
     pagesDone++;
     if (task.offset === 0) {
       sliceTotal.set(sk, total);
-      if (total > OFFSET_LIMIT + PAGE) log(`Uwaga: ${task.from}-${task.to} ma ${total} wyników, pobiorę tylko pierwsze ${OFFSET_LIMIT + PAGE}\n`);
-      for (let off = PAGE; off < total && off <= OFFSET_LIMIT; off += PAGE) { queue.push({ ...task, offset: off, tries: 0 }); pagesKnown++; }
+      if (!task.prefix && total > GUEST_MAX) {
+        // za dużo dla gościa: ten przedział pobieramy literami (pierwsza strona i tak się przyda)
+        for (const L of LETTERS) { queue.push({ ...task, prefix: L, offset: 0, tries: 0, rechecked: true }); pagesKnown++; }
+        log(`${label(task)}: ${total} wyników > ${GUEST_MAX}, dzielę na ${LETTERS.length} wyszukiwań po pierwszej literze tytułu\n`);
+      } else {
+        if (total > GUEST_MAX) log(`Uwaga: ${label(task)} ma ${total} wyników, pobiorę tylko pierwsze ${GUEST_MAX}\n`);
+        for (let off = PAGE; off < Math.min(total, GUEST_MAX); off += PAGE) { queue.push({ ...task, offset: off, tries: 0 }); pagesKnown++; }
+      }
     }
     for (const d of json.docs || []) {
       const rec = toRecord(d, task.from, task.to, libs);
       if (rec && !records.has(rec.id)) records.set(rec.id, rec);
     }
-    log(`[${mins()} min] strony ${pagesDone}/${pagesKnown} · ${task.from === task.to ? task.from : task.from + '-' + task.to} @${task.offset}/${total} → ${records.size} rekordów${concurrency > 1 ? '' : ' (po jednym)'}\n`);
+    log(`[${mins()} min] strony ${pagesDone}/${pagesKnown} · ${label(task)} @${task.offset}/${total} → ${records.size} rekordów\n`);
   }
 
   await new Promise((resolve, reject) => {
