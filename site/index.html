@@ -621,14 +621,29 @@ function entriesFromCSV(text){
   if (ti < 0) return rows.map(r => ({t:r[0]}));
   return rows.slice(1).map(r => ({ t:r[ti], o: oi >= 0 ? r[oi] : '', y: yi >= 0 ? Number(r[yi]) || 0 : 0 })).filter(e => e.t);
 }
+// Znormalizowane tytuły liczone raz na zestaw danych i indeks po pierwszym słowie tytułu
+// (bez tego lista z Filmwebu z tysiącem pozycji normalizowała ~40 mln tytułów i zamrażała stronę).
+function matchIndex(){
+  if (DATA._mi) return DATA._mi;
+  const idx = new Map(), add = (k, r) => { if (!k) return; const w = k.split(' ')[0]; let a = idx.get(w); if (!a) idx.set(w, a = []); a.push(r); };
+  for (const r of DATA.recs) {
+    r._t = norm(r.t); r._o = norm(r.o || ''); r._who = norm(r.d.join(' '));
+    add(r._t, r); if (r._o !== r._t) add(r._o, r);
+  }
+  return DATA._mi = idx;
+}
 function matchEntries(entries, label){
   fwActive = '';
   const hit = new Set(); let found = 0;
+  const idx = matchIndex();
   for (const e of entries) {
     const ks = [norm(e.t), norm(e.o)].filter(k => k.length > 1);
     let any = false;
-    for (const r of DATA.recs) {
-      const t = norm(r.t), o = norm(r.o||''), who = norm(r.d.join(' '));
+    // tytuł trafia tylko wtedy, gdy zaczyna się od tego samego słowa, więc sprawdzamy jedynie te rekordy z indeksu;
+    // w muzyce dochodzi szukanie po wykonawcy, które musi przejrzeć wszystko
+    const pool = state.mode === 'music' ? DATA.recs : new Set(ks.flatMap(k => idx.get(k.split(' ')[0]) || []));
+    for (const r of pool) {
+      const t = r._t, o = r._o, who = r._who;
       const titleHit = ks.some(k => k===t || k===o || t.startsWith(k+' ') || o.startsWith(k+' '));
       const whoHit = state.mode==='music' && ks.some(k => k.length > 3 && who.includes(k));
       // rok z eksportu to rok premiery; na płycie bywa rok wydania DVD, stąd tolerancja
