@@ -16,9 +16,12 @@ const TERMS = MUSIC
   : ['film OR reżyseria OR i OR dvd OR w OR na OR z'];
 const PAGE = 100;          // 100 wyników trwa tyle co 50, więc o połowę mniej zapytań
 const OFFSET_LIMIT = 1900; // Primo odrzuca offset powyżej ~2000
-const CONCURRENCY = 4;     // 4 zapytania naraz trwają tyle co jedno; 8 już zwalnia
-const DELAY_MS = 250;      // przerwa po każdej stronie, bądź uprzejmy dla serwera biblioteki
-const TOKEN_TTL_MS = 90_000; // token gościa wygasa po kilku minutach (HTTP 401)
+// Katalog ogranicza tempo zapytań z jednego IP: przy ok. 17 stronach/min po ~3 minutach zaczyna zwracać
+// 401 i puste wyniki; po kolei (~7/min) działa bez końca. Zaczynamy od 2 naraz i schodzimy do 1 przy pierwszej blokadzie.
+const START_CONCURRENCY = 2;
+const DELAY_MS = Number(process.env.DELAY_MS || 1000);  // przerwa po każdej stronie
+const THROTTLE_PAUSE_MS = Number(process.env.THROTTLE_PAUSE_MS || 60_000); // przerwa po blokadzie (rośnie przy kolejnych)
+const MAX_REQUEUE = 5;        // tyle razy ponawiamy jedną stronę, zanim ją pominiemy
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (s) => process.stderr.write(s);
@@ -51,7 +54,7 @@ async function search(jwt, { term, from, to, offset }) {
   const res = await fetch(`${HOST}/primaws/rest/pub/pnxs?${params}`, {
     headers: { Authorization: `Bearer ${jwt}` },
   });
-  if (!res.ok) throw new Error(`pnxs HTTP ${res.status} (${term} ${from}-${to} @${offset})`);
+  if (!res.ok) { const e = new Error(`pnxs HTTP ${res.status} (${from}-${to} @${offset})`); e.status = res.status; throw e; }
   return res.json();
 }
 
@@ -61,7 +64,7 @@ async function search(jwt, { term, from, to, offset }) {
 const CREDITS = /\s+(?:(?:a\s+)?film\s+by|produced|production|presents|directed|written|screenplay|created|reżyseria|scenariusz|Disney|HBO|Warner|Universal|Paramount|Netflix|Sony|Lionsgate|Studio)\b.*$/i;
 const cut = (s) => (s || '').split(' / ')[0].split(' ; ')[0].replace(CREDITS, '')
   .replace(/\s*[\[(]film[\])]\s*/gi, ' ').replace(ORIG_PREFIX, '')
-  .replace(/\s+reż\.\s.*$/i, '').replace(/\s+film\s+\p{Lu}[\p{L}-]+(?:\s+\p{Lu}[\p{L}-]+)+\.?$/u, '')
+  .replace(/\s+reż\.[\s,:].*$/i, '').replace(/\s+scen\.[\s,:].*$/i, '').replace(/\s+film\s+\p{Lu}[\p{L}-]+(?:\s+\p{Lu}[\p{L}-]+)+\.?$/u, '')
   .replace(/,\s*\d{4}$/, '').replace(/\s*:\s*$/, '').replace(/\s+/g, ' ').trim();
 const ORIG_PREFIX = /^(?:Tytuł oryginału|Tyt\.?\s*oryg\.?)\s*:\s*/i;
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
@@ -178,94 +181,161 @@ function musicRecord(doc, from, to, libs) {
   };
 }
 
+
+// ---------- łączenie wydań ----------
+// Ta sama praca w kilku wydaniach (inne lata płyty, DVD i Blu-ray) to w katalogu osobne rekordy.
+// Łączymy je po tytule i reżyserze (filmy) albo wykonawcy (muzyka); bez twórcy także po roku.
+const keyNorm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ł/g, 'l')
+  .replace(/^(the|a|an)\s+/, '').replace(/[^a-z0-9]+/g, ' ').trim();
+function creatorKey(r) {
+  const who = r.d?.[0] || '';
+  if (!who) return '';
+  const surname = who.includes(',') ? who.split(',')[0] : who.split(/\s+/).pop();
+  return keyNorm(surname);
+}
+function groupEditions(recs) {
+  // najpierw po tytule, potem w obrębie tytułu po twórcy
+  const byTitle = new Map();
+  for (const r of recs) {
+    const k = keyNorm(r.t);
+    if (!byTitle.has(k)) byTitle.set(k, []);
+    byTitle.get(k).push(r);
+  }
+  const groups = new Map();
+  for (const [tk, list] of byTitle) {
+    const withWho = new Map(), without = [];
+    for (const r of list) {
+      const who = creatorKey(r);
+      if (!who) { without.push(r); continue; }
+      if (!withWho.has(who)) withWho.set(who, []);
+      withWho.get(who).push(r);
+    }
+    // wydanie bez twórcy dołącza do jedynego twórcy o tym tytule; inaczej łączymy je tylko po roku
+    if (withWho.size === 1) [...withWho.values()][0].push(...without);
+    else for (const r of without) {
+      const yk = 'y' + r.y;
+      if (!withWho.has(yk)) withWho.set(yk, []);
+      withWho.get(yk).push(r);
+    }
+    for (const [who, g] of withWho) groups.set(`${tk}|${who}`, g);
+  }
+  const out = [];
+  for (const g of groups.values()) {
+    if (g.length === 1) { const r = g[0]; out.push({ ...r, fs: [r.f] }); continue; }
+    // główny rekord: najwięcej egzemplarzy, potem najnowsze wydanie
+    g.sort((a, b) => b.h.length - a.h.length || Number(b.y || 0) - Number(a.y || 0));
+    const main = g[0];
+    const byLib = new Map();
+    for (const r of g) for (const [code, ok] of r.h) byLib.set(code, Math.max(byLib.get(code) ?? 0, ok));
+    const years = g.map((r) => Number(r.y)).filter(Boolean);
+    out.push({
+      ...main,
+      o: main.o || g.find((r) => r.o)?.o,
+      y: years.length ? String(Math.min(...years)) : main.y,
+      g: main.g.length ? main.g : (g.find((r) => r.g.length)?.g || []),
+      c: main.c?.length ? main.c : g.find((r) => r.c?.length)?.c,
+      fs: [...new Set(g.map((r) => r.f))],
+      h: [...byLib.entries()],
+      alt: g.slice(1).map((r) => [r.id, r.y, r.f]),
+    });
+  }
+  return out;
+}
+
 // ---------- główna pętla ----------
 
 async function main() {
   const lastYear = Number(process.argv[2] || new Date().getFullYear());
   const started = Date.now();
-  // Token gościa wygasa po kilku minutach, więc odświeżamy go zawczasu; jedno odświeżenie naraz.
+  const mins = () => ((Date.now() - started) / 60000).toFixed(1);
+  // Token gościa jest ważny 24 h; nowy pobieramy tylko po odmowie.
   let jwt = await guestJwt();
-  let jwtAt = Date.now();
-  let refreshing = null;
-  const freshJwt = async (force = false) => {
-    if (force || Date.now() - jwtAt > TOKEN_TTL_MS) {
-      refreshing ||= guestJwt().then((t) => { jwt = t; jwtAt = Date.now(); }).finally(() => { refreshing = null; });
-      await refreshing;
-    }
-    return jwt;
-  };
   const toRecord = MUSIC ? musicRecord : filmRecord;
   const records = new Map();
   const libs = {};
-  let errors = 0, pagesDone = 0, pagesKnown = 0;
+  const sliceTotal = new Map();      // liczba wyników przedziału z jego pierwszej strony
+  let errors = 0, pagesDone = 0, pagesKnown = 0, throttles = 0;
+  let concurrency = START_CONCURRENCY, pauseUntil = 0;
 
-  async function fetchPage({ term, from, to, offset }) {
-    // do 3 prób z rosnącą przerwą; przy każdym błędzie nowy token
-    for (const [attempt, wait] of [[1, 0], [2, 3000], [3, 15000]]) {
-      try {
-        if (wait) await sleep(wait);
-        const json = await search(await freshJwt(attempt > 1), { term, from, to, offset });
-        if (json.errorCode) return json;
-        const n = (json.docs || []).length;
-        const expected = Math.min(PAGE, (json.info?.total ?? 0) - offset);
-        // niepełna strona przed końcem wyników = chwilowy błąd, spróbuj jeszcze raz
-        if (n < expected && attempt < 3) continue;
-        return json;
-      } catch (e) {
-        if (attempt === 3) {
-          errors++;
-          log(`\nPominięto ${from}-${to} „${term}” od ${offset}: ${e.message}\n`);
-          if (errors > 40) throw new Error('Za dużo błędów katalogu, przerywam.');
-        }
-      }
-    }
-    return null;
-  }
-
-  // Kolejka stron: najpierw pierwsza strona każdego przedziału, kolejne dopisujemy, gdy znamy liczbę wyników.
   const queue = [];
-  for (const [from, to] of yearRanges(lastYear)) for (const term of TERMS) queue.push({ term, from, to, offset: 0 });
+  for (const [from, to] of yearRanges(lastYear)) for (const term of TERMS) queue.push({ term, from, to, offset: 0, tries: 0 });
   pagesKnown = queue.length;
 
+  async function throttled(task, why) {
+    throttles++;
+    const pause = Math.min(THROTTLE_PAUSE_MS * 2 ** Math.min(throttles - 1, 3), 8 * 60_000);
+    pauseUntil = Math.max(pauseUntil, Date.now() + pause);
+    if (concurrency > 1) concurrency = 1;
+    task.tries++;
+    if (task.tries > MAX_REQUEUE) {
+      errors++;
+      log(`[${mins()} min] POMINIĘTO ${task.from}-${task.to} @${task.offset} po ${MAX_REQUEUE} próbach (${why})\n`);
+      if (errors > 40) throw new Error('Za dużo pominiętych stron, przerywam.');
+      return;
+    }
+    log(`[${mins()} min] katalog ogranicza tempo (${why}); przerwa ${pause / 1000} s, dalej po jednym zapytaniu\n`);
+    queue.unshift(task);             // ta sama strona wraca na początek kolejki
+    try { jwt = await guestJwt(); } catch {}
+  }
+
   async function runTask(task) {
-    const json = await fetchPage(task);
-    pagesDone++;
-    if (!json) return;
+    const wait = pauseUntil - Date.now();
+    if (wait > 0) await sleep(wait);
+    let json;
+    try {
+      json = await search(jwt, task);
+    } catch (e) {
+      if (e.status === 401 || e.status === 403 || e.status === 429 || e.status >= 500 || !e.status) return throttled(task, e.message);
+      throw e;
+    }
     if (json.errorCode) {
-      log(`\nKatalog odpowiedział: ${json.errorMessage || json.errorCode} (${task.from}-${task.to} ${task.term} @${task.offset})\n`);
+      log(`[${mins()} min] katalog odpowiedział: ${json.errorMessage || json.errorCode} (${task.from}-${task.to} @${task.offset})\n`);
+      pagesDone++;
       return;
     }
     const total = json.info?.total ?? 0;
+    const n = (json.docs || []).length;
+    const sk = `${task.from}-${task.to}|${task.term}`;
+    const known = sliceTotal.get(sk);
+    // Pusta odpowiedź tam, gdzie wcześniej były wyniki = blokada, nie koniec danych.
+    if (task.offset > 0 && (total === 0 || n === 0)) return throttled(task, 'pusta strona w środku wyników');
+    // Pusty przedział sprawdzamy jeszcze raz na końcu kolejki (bez przerwy): bywa prawdziwy, bywa blokadą.
+    if (task.offset === 0 && total === 0 && !task.rechecked) { queue.push({ ...task, rechecked: true }); return; }
+    const expected = Math.min(PAGE, (known ?? total) - task.offset);
+    if (n < expected && task.tries < MAX_REQUEUE) return throttled(task, `niepełna strona ${n}/${expected}`);
+
+    pagesDone++;
     if (task.offset === 0) {
-      if (total > OFFSET_LIMIT + PAGE) log(`\nUwaga: ${task.from}-${task.to} „${task.term}” ma ${total} wyników, pobiorę tylko pierwsze ${OFFSET_LIMIT + PAGE}\n`);
-      for (let off = PAGE; off < total && off <= OFFSET_LIMIT; off += PAGE) { queue.push({ ...task, offset: off }); pagesKnown++; }
+      sliceTotal.set(sk, total);
+      if (total > OFFSET_LIMIT + PAGE) log(`Uwaga: ${task.from}-${task.to} ma ${total} wyników, pobiorę tylko pierwsze ${OFFSET_LIMIT + PAGE}\n`);
+      for (let off = PAGE; off < total && off <= OFFSET_LIMIT; off += PAGE) { queue.push({ ...task, offset: off, tries: 0 }); pagesKnown++; }
     }
     for (const d of json.docs || []) {
       const rec = toRecord(d, task.from, task.to, libs);
       if (rec && !records.has(rec.id)) records.set(rec.id, rec);
     }
-    const min = ((Date.now() - started) / 60000).toFixed(1);
-    log(`[${min} min] strony ${pagesDone}/${pagesKnown} · ${task.from === task.to ? task.from : task.from + '-' + task.to} @${task.offset}/${total} → ${records.size} rekordów\n`);
+    log(`[${mins()} min] strony ${pagesDone}/${pagesKnown} · ${task.from === task.to ? task.from : task.from + '-' + task.to} @${task.offset}/${total} → ${records.size} rekordów${concurrency > 1 ? '' : ' (po jednym)'}\n`);
   }
 
-  // CONCURRENCY zapytań naraz; katalog przetwarza ok. 4 równolegle bez spowolnienia
   await new Promise((resolve, reject) => {
-    let active = 0;
+    let active = 0, failed = false;
     const next = () => {
+      if (failed) return;
       if (!queue.length && active === 0) return resolve();
-      while (active < CONCURRENCY && queue.length) {
+      while (active < concurrency && queue.length) {
         const task = queue.shift();
         active++;
         runTask(task)
           .then(() => sleep(DELAY_MS))
-          .then(() => { active--; next(); }, (e) => reject(e));
+          .then(() => { active--; next(); }, (e) => { failed = true; reject(e); });
       }
     };
     next();
   });
 
-  log(`Gotowe w ${((Date.now() - started) / 60000).toFixed(1)} min: ${records.size} rekordów, ${pagesDone} stron, błędów: ${errors}\n`);
-  process.stdout.write(JSON.stringify({ kind: MUSIC ? 'music' : 'films', harvestedAt: new Date().toISOString(), libs, recs: [...records.values()] }));
+  const merged = groupEditions([...records.values()]);
+  log(`Gotowe w ${mins()} min: ${records.size} rekordów → ${merged.length} po połączeniu wydań, ${pagesDone} stron, blokad: ${throttles}, pominiętych stron: ${errors}\n`);
+  process.stdout.write(JSON.stringify({ kind: MUSIC ? 'music' : 'films', harvestedAt: new Date().toISOString(), libs, recs: merged }));
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
