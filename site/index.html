@@ -231,7 +231,7 @@ ul.branches li.mine{background:color-mix(in oklab,var(--accent) 12%,transparent)
 
 <footer class="wrap foot">
   <p>Dane: katalog Biblioteki Raczyńskich, odświeżane co noc. Dostępność może się zmienić w ciągu dnia, przed wyjściem sprawdź ją w katalogu. Ulubione zapisują się tylko w tej przeglądarce.</p>
-  <p>Plakaty, oceny i opisy filmów pochodzą z TMDB. Ta strona korzysta z API TMDB, ale nie jest przez TMDB wspierana ani certyfikowana. Okładki płyt: Cover Art Archive i MusicBrainz. Nie jest to oficjalna strona biblioteki.</p>
+  <p>Plakaty, oceny i opisy filmów pochodzą z TMDB. Ta strona korzysta z API TMDB, ale nie jest przez TMDB wspierana ani certyfikowana. Okładki, daty i rodzaje wydań płyt: MusicBrainz i Cover Art Archive; popularność albumów: ListenBrainz. Nie jest to oficjalna strona biblioteki.</p>
 </footer>
 
 <div class="scrim" id="scrim" hidden></div>
@@ -271,8 +271,18 @@ const MODES = {
   music: { file:'music.json', noun:['płyta','płyty','płyt'], who:'Wykonawca', search:'Album, wykonawca, gatunek…', status:['Na półce','Wypożyczona'],
     fmtName:{CD:'CD',LP:'Winyl',MC:'Kaseta',SACD:'SACD'}, link:'Posłuchaj', linkQ:r=>`${r.d[0]||''} ${r.t}`,
     wlHead:'Sprawdź swoją listę albumów', wlPh:'Wklej albumy lub wykonawców, po jednym w wierszu:\nKayah\nBrothers in arms\nMiles Davis',
-    sorts:[['year','Najnowsze płyty'],['new','Nowe w bibliotece'],['avail','Najwięcej dostępnych'],['title','Tytuł A–Z'],['artist','Wykonawca A–Z'],['old','Najstarsze']] },
+    sorts:[['pop','Najpopularniejsze'],['year','Najnowsze płyty'],['new','Nowe w bibliotece'],['avail','Najwięcej dostępnych'],['title','Tytuł A–Z'],['artist','Wykonawca A–Z'],['old','Najstarsze']] },
 };
+// Popularność albumu: liczba słuchaczy w ListenBrainz (skala logarytmiczna).
+// Koncertówki, składanki i remiksy spadają niżej, żeby po wpisaniu wykonawcy na górze były znane albumy studyjne.
+const MINOR = /Live|Compilation|Remix|DJ-mix|Mixtape|Demo|Interview|Spokenword/;
+function popScore(r){
+  const base = r.pu > 0 ? Math.log10(r.pu + 1) : (r.mb ? 0.3 : 0);
+  return base - (MINOR.test(r.tp || '') ? 1.5 : 0);
+}
+const TYPE_PL = [[/Live/, 'Album koncertowy'], [/Compilation/, 'Kompilacja'], [/Soundtrack/, 'Ścieżka dźwiękowa'], [/Remix/, 'Remiksy'],
+  [/^EP/, 'EP'], [/^Single/, 'Singiel'], [/^Album/, 'Album studyjny']];
+const typeName = t => (TYPE_PL.find(([re]) => re.test(t || '')) || [])[1] || '';
 const cache = {};
 async function load(mode){
   if (cache[mode]) return cache[mode];
@@ -288,12 +298,13 @@ async function load(mode){
     const py = Number((r.p||'').slice(0,4)) || 0;
     const yn = py || Number(r.y) || 0;
     return {...r, c:r.c||[], g:r.g||[], d:who, G, rate, fs:r.fs||[r.f], alt:r.alt||[], yn, yr: yn ? String(yn) : '', py,
-      img: r.tmdb?.poster || r.cv || '', isNew: !!r.n && r.n >= newSince,
+      img: r.tmdb?.poster || r.cv || '', isNew: !!r.n && r.n >= newSince, pop: popScore(r),
       key: norm(r.t + ' ' + (r.o||'') + ' ' + who.join(' '))};
   });
   const ys = d.recs.map(r => r.yn).filter(y => y > 1880);
   d.minY = ys.length ? Math.min(...ys) : 1900; d.maxY = ys.length ? Math.max(...ys) : new Date().getFullYear();
   d.hasDates = d.recs.some(r => r.n);
+  d.hasPop = d.recs.some(r => r.pu > 0);
   d.newCount = d.recs.filter(r => r.isNew).length;
   return cache[mode] = d;
 }
@@ -336,8 +347,9 @@ async function switchMode(mode){
   catch(e) { DATA = null; $('grid').innerHTML = `<div class="empty">${mode==='music'?'Muzyka nie jest jeszcze pobrana. Pojawi się po najbliższym nocnym odświeżeniu.':'Nie udało się wczytać listy. Odśwież stronę za chwilę.'}</div>`; return; }
   if (state.mode !== mode) return;
   // „Nowe w bibliotece” ma sens dopiero, gdy harvester zna daty pojawienia się płyt
-  $('sort').innerHTML = M.sorts.filter(([v]) => v !== 'new' || DATA.hasDates).map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
-  state.sort = 'year';
+  $('sort').innerHTML = M.sorts.filter(([v]) => (v !== 'new' || DATA.hasDates) && (v !== 'pop' || DATA.hasPop)).map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
+  state.sort = mode === 'music' && DATA.hasPop ? 'pop' : 'year';
+  $('sort').value = state.sort;
   $('onlyNewWrap').hidden = !DATA.newCount;
   LIBS = {...LIBS, ...DATA.libs};
   const codes = Object.keys(LIBS).sort((a,b)=> (a==='WYPOZ'?-1:b==='WYPOZ'?1:(parseInt(a.slice(1))||999)-(parseInt(b.slice(1))||999)));
@@ -381,6 +393,7 @@ function filtered(){
   const cmp = {
     year:(a,b)=>b.yn-a.yn||byT(a,b), old:(a,b)=>(a.yn||9999)-(b.yn||9999)||byT(a,b), title:byT,
     new:(a,b)=>(b.n||'').localeCompare(a.n||'')||b.yn-a.yn||byT(a,b),
+    pop:(a,b)=>b.pop-a.pop||b.yn-a.yn||byT(a,b),
     avail:(a,b)=>av(b)-av(a)||b.yn-a.yn,
     top:(a,b)=>(b.rate||0)-(a.rate||0)||(b.tmdb?.votes||0)-(a.tmdb?.votes||0),
     artist:(a,b)=>(a.d[0]||'￿').localeCompare(b.d[0]||'￿','pl')||byT(a,b),
@@ -455,6 +468,8 @@ function openSheet(id){
       ${r.g.length?`<dt>Gatunek</dt><dd>${esc(r.g.join(', '))}</dd>`:''}
       ${r.a?`<dt>Dla kogo</dt><dd>${esc(r.a)}</dd>`:''}
       ${r.py?`<dt>${state.mode==='films'?(r.tmdb?.kind==='tv'?'Premiera serialu':'Premiera'):'Pierwsze wydanie'}</dt><dd>${esc(fmtPart(r.p))}</dd>`:''}
+      ${typeName(r.tp)?`<dt>Rodzaj wydania</dt><dd>${esc(typeName(r.tp))}</dd>`:''}
+      ${r.pu>0?`<dt>Słuchacze</dt><dd>${r.pu.toLocaleString('pl-PL')} w ListenBrainz</dd>`:''}
       ${r.py&&r.y&&Number(r.y)!==r.py?`<dt>Wydanie płyty</dt><dd>${esc(r.y)}</dd>`:''}
       ${r.n?`<dt>W katalogu od</dt><dd>${esc(fmtDate(r.n))}${r.isNew?' · nowość':''}</dd>`:''}
       <dt>Wypożyczenie</dt><dd>14 dni</dd>

@@ -1,7 +1,7 @@
 name: Wzbogać i opublikuj
 
 # 1) szybko: dane z katalogu + to, co już jest w cache TMDB i MusicBrainz → strona (ok. 2 min)
-# 2) potem: nowe dopasowania TMDB, okładki i daty z MusicBrainz (do 40 min) → strona jeszcze raz
+# 2) potem: nowe dopasowania TMDB, okładki, daty i rodzaje wydań z MusicBrainz (do 35 min), popularność z ListenBrainz (do 8 min) → strona jeszcze raz
 # Zmiana strony (site/**) albo skryptów wzbogacania publikuje się więc od razu, bez czekania na katalog.
 # Dopóki zostały płyty do sprawdzenia w MusicBrainz, przebieg zamawia następny.
 
@@ -78,6 +78,7 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           TMDB_LOOKUPS: '0'
           MB_MINUTES: '0'
+          LB_MINUTES: '0'
         run: |
           [ -s films-raw.json ] && node harvester/enrich-tmdb.mjs films-raw.json tmdb-cache.json > site/films.json
           [ -s music-raw.json ] && node harvester/enrich-music.mjs music-raw.json mb-cache.json > site/music.json
@@ -157,7 +158,8 @@ jobs:
         id: music
         continue-on-error: true
         env:
-          MB_MINUTES: '40'
+          MB_MINUTES: '35'
+          LB_MINUTES: '8'
         run: |
           [ -s music-raw.json ] || { echo "Brak danych muzyki."; exit 0; }
           node harvester/enrich-music.mjs music-raw.json mb-cache.json > site/music.json

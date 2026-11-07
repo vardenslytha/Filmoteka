@@ -45,6 +45,8 @@ async function get(url, opts, tries = 0) {
 }
 
 const misses = {}, missSamples = [];
+// "Album", "Album+Live", "Album+Compilation", "EP"… – typ główny i dodatkowe z MusicBrainz
+const typesOf = (g) => [g['primary-type'] || '', ...(g['secondary-types'] || [])].filter(Boolean).join('+');
 let lastMb = 0;
 async function mb(path, tries = 0) {
   const wait = lastMb + MB_GAP_MS - Date.now();
@@ -96,19 +98,24 @@ async function match(r) {
     return null;
   }
   // pierwsza pasująca grupa z okładką; jeśli żadna nie ma okładki, zapamiętujemy samo dopasowanie
-  for (const g of cands.slice(0, 2)) if (await hasCover(g.id)) return { rg: g.id, cover: `${CAA_PUBLIC}/release-group/${g.id}/front-250`, date: g['first-release-date'] || '' };
-  return { rg: cands[0].id, cover: null, date: cands[0]['first-release-date'] || '' };
+  const meta = (g) => ({ date: g['first-release-date'] || '', types: typesOf(g) });
+  for (const g of cands.slice(0, 2)) if (await hasCover(g.id)) return { rg: g.id, cover: `${CAA_PUBLIC}/release-group/${g.id}/front-250`, ...meta(g) };
+  return { rg: cands[0].id, cover: null, ...meta(cands[0]) };
 }
 
 const now = Date.now();
 const apply = (r, c) => {
-  if (c && !c.miss) { r.mb = c.rg; if (c.cover) r.cv = c.cover; else delete r.cv; if (c.date) r.p = c.date; }
+  if (c && !c.miss) {
+    r.mb = c.rg; if (c.cover) r.cv = c.cover; else delete r.cv; if (c.date) r.p = c.date;
+    if (c.types) r.tp = c.types;                          // np. "Album", "Album+Live", "Album+Compilation"
+    if (c.pop && c.pop.u != null) r.pu = c.pop.u;          // słuchacze w ListenBrainz
+  }
 };
 // Dopasowania sprzed v10 nie mają daty pierwszego wydania: dociągamy ją jednym zapytaniem o grupę wydań.
-const needsDate = (c) => c && !c.miss && c.date === undefined;
+const needsDate = (c) => c && !c.miss && (c.date === undefined || c.types === undefined);
 for (const r of data.recs) apply(r, cache[r.id]);
 // stan po nałożeniu cache; „zmiana” to tylko to, co przybyło z nowych zapytań
-const before = new Map(data.recs.map((r) => [r.id, (r.cv || '') + '|' + (r.p || '')]));
+const before = new Map(data.recs.map((r) => [r.id, [r.cv, r.p, r.tp, r.pu].join('|')]));
 
 const todo = data.recs.filter((r) => {
   const c = cache[r.id];
@@ -124,12 +131,13 @@ for (const r of todo) {
     if (needsDate(cache[r.id])) {
       const g = await mb(`/ws/2/release-group/${encodeURIComponent(cache[r.id].rg)}?fmt=json`);
       cache[r.id].date = g['first-release-date'] || '';
+      cache[r.id].types = typesOf(g);
       dated++; apply(r, cache[r.id]);
       continue;
     }
     const m = await match(r);
     asked++;
-    const c = m ? { v: MATCH_VERSION, at: now, rg: m.rg, cover: m.cover, date: m.date } : { v: MATCH_VERSION, at: now, miss: true };
+    const c = m ? { v: MATCH_VERSION, at: now, rg: m.rg, cover: m.cover, date: m.date, types: m.types } : { v: MATCH_VERSION, at: now, miss: true };
     cache[r.id] = c;
     if (m) { hits++; if (m.cover) covers++; }
     apply(r, c);
@@ -141,17 +149,57 @@ for (const r of todo) {
   if (asked % 200 === 0 && asked) log(`[${((Date.now() - started) / 60000).toFixed(1)} min] sprawdzone ${asked}/${todo.length} · dopasowane ${hits} · z okładką ${covers}\n`);
 }
 
+// ---------- popularność z ListenBrainz ----------
+// Liczba słuchaczy grupy wydań (otwarte dane MetaBrainz, bez klucza, po 50 identyfikatorów na zapytanie).
+// Odświeżamy raz na POP_REFRESH_DAYS dni.
+const LB = process.env.LB_HOST || 'https://api.listenbrainz.org';
+const LB_MINUTES = Number(process.env.LB_MINUTES ?? 8);
+const POP_REFRESH_DAYS = 30;
+let popAsked = 0, popFailures = 0;
+{
+  const popStarted = Date.now();
+  const due = new Map();   // rg → wpisy cache do uzupełnienia
+  for (const c of Object.values(cache)) {
+    if (!c || c.miss || !c.rg) continue;
+    if (c.pop && now - c.pop.at < POP_REFRESH_DAYS * 864e5) continue;
+    if (!due.has(c.rg)) due.set(c.rg, []);
+    due.get(c.rg).push(c);
+  }
+  const ids = [...due.keys()];
+  for (let i = 0; i < ids.length && LB_MINUTES > 0; i += 50) {
+    if (Date.now() - popStarted > LB_MINUTES * 60000) break;
+    const batch = ids.slice(i, i + 50);
+    try {
+      const res = await get(`${LB}/1/popularity/release-group`, { method: 'POST',
+        headers: { 'User-Agent': UA, 'Content-Type': 'application/json' }, body: JSON.stringify({ release_group_mbids: batch }) });
+      if (res.status === 429) { await sleep(10000); i -= 50; continue; }
+      if (!res.ok) throw new Error(`ListenBrainz HTTP ${res.status}`);
+      const rows = await res.json();
+      for (const row of Array.isArray(rows) ? rows : []) {
+        for (const c of due.get(row.release_group_mbid) || []) c.pop = { at: now, u: row.total_user_count ?? 0, l: row.total_listen_count ?? 0 };
+      }
+      popAsked += batch.length;
+    } catch (e) {
+      popFailures++; log(`ListenBrainz: ${e.message}\n`);
+      if (popFailures > 5) break;
+    }
+    await sleep(1000);
+  }
+  if (popAsked) for (const r of data.recs) apply(r, cache[r.id]);
+}
+
 const withCover = data.recs.filter((r) => r.cv).length;
-const changed = data.recs.filter((r) => (r.cv || '') + '|' + (r.p || '') !== before.get(r.id)).length;
+const changed = data.recs.filter((r) => [r.cv, r.p, r.tp, r.pu].join('|') !== before.get(r.id)).length;
 const left = todo.length - asked - dated;
 log(`Gotowe: sprawdzone teraz ${asked}, dopasowane ${hits}, z okładką ${covers}; okładki ma ${withCover}/${data.recs.length} płyt; zostało do sprawdzenia ${left}\n`);
-if (cachePath && asked + dated > 0) writeFileSync(cachePath, JSON.stringify(cache));
+if (cachePath && asked + dated + popAsked > 0) writeFileSync(cachePath, JSON.stringify(cache));
 if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed > 0}\nremaining=${left}\n`);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
   '### Muzyka: okładki z MusicBrainz', '', '| | |', '|---|---|',
   `| Sprawdzone w tym przebiegu | ${asked} |`, `| Dopasowane / z okładką | ${hits} / ${covers} |`,
   `| Płyty z okładką na stronie | ${withCover} z ${data.recs.length} |`, `| Zostało do sprawdzenia | ${left} |`,
-  `| Dociągnięte daty pierwszego wydania | ${dated} |`, `| Błędy zapytań | ${failures} |`,
+  `| Dociągnięte daty i typy wydań | ${dated} |`, `| Popularność z ListenBrainz (sprawdzone grupy wydań) | ${popAsked}${popFailures ? `, błędy: ${popFailures}` : ''} |`,
+  `| Płyty z popularnością | ${data.recs.filter((r) => r.pu > 0).length} |`, `| Błędy zapytań | ${failures} |`,
   `| Bez dopasowania (powód) | ${Object.entries(misses).map(([k, v]) => `${k}: ${v}`).join(', ') || '–'} |`, '',
   missSamples.length ? '**Przykłady bez dopasowania:**\n\n' + missSamples.map((m) => '- ' + m).join('\n') : '', '', ''].join('\n'));
 process.stdout.write(JSON.stringify(data));
