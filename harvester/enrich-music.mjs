@@ -192,6 +192,10 @@ const withCover = data.recs.filter((r) => r.cv).length;
 const changed = data.recs.filter((r) => [r.cv, r.p, r.tp, r.pu].join('|') !== before.get(r.id)).length;
 const left = todo.length - asked - dated;
 log(`Gotowe: sprawdzone teraz ${asked}, dopasowane ${hits}, z okładką ${covers}; okładki ma ${withCover}/${data.recs.length} płyt; zostało do sprawdzenia ${left}\n`);
+// to samo co w podsumowaniu, także w logu (logi da się czytać przez API, podsumowania nie)
+log(`Bez dopasowania: ${Object.entries(misses).map(([k, v]) => `${k} ${v}`).join(', ') || '–'}\n`);
+for (const m of missSamples) log(`  bez dopasowania: ${m}\n`);
+log(`ListenBrainz: sprawdzone grupy wydań ${popAsked}, błędy ${popFailures}; płyty z popularnością ${data.recs.filter((r) => r.pu > 0).length}\n`);
 if (cachePath && asked + dated + popAsked > 0) writeFileSync(cachePath, JSON.stringify(cache));
 if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed > 0}\nremaining=${left}\n`);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
