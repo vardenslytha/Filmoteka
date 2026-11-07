@@ -13,6 +13,9 @@ const CAA_PUBLIC = 'https://coverartarchive.org';
 const repo = process.env.GITHUB_REPOSITORY ? `https://github.com/${process.env.GITHUB_REPOSITORY}` : 'local test';
 const UA = `PolkaRaczynskich/1.0 ( ${repo} )`;   // MusicBrainz wymaga opisowego User-Agenta
 const MATCH_VERSION = 1;
+// Wersja reguł szukania. Płyty, które nie dopasowały się starszymi regułami, sprawdzamy ponownie od razu
+// (dopasowane zostają w cache). 2 = czyszczenie tytułów z doklejonych wykonawców i ról.
+const MATCHER = 2;
 const MB_GAP_MS = Number(process.env.MB_GAP_MS || 1100);     // odstęp między zapytaniami do MusicBrainz
 const MINUTES = Number(process.env.MB_MINUTES || 15);
 const RETRY_MISSES_AFTER_DAYS = 60;
@@ -32,6 +35,22 @@ const norm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,
 const surname = (n) => norm(n).split(' ').pop();
 // tytuł bez dopisków w nawiasach i podtytułów po dwukropku, do zapytania i porównania
 const baseTitle = (t) => (t || '').replace(/\s*[\[(].*?[\])]\s*/g, ' ').split(/\s*[:;]\s+/)[0].trim();
+// Katalog dokleja do tytułu albumu wykonawców i role: "Kind of blue Miles Davis [wyk.]",
+// "Officium novum Jan Garbarek, The Hilliard Ensamble", "WASZA WSPANIAŁOŚĆ wyk., muz. i sł". Odcinamy to.
+const ROLE_CUT = /\s+(?:wyk\.|wyk\b|muz\.|sł\.|sł\b|słowa\b|tekst\b|wykonanie\b|dyr\.|dyryguje\b|aranż|oprac\.|feat\.|ft\.)(?:.*)$/i;
+function albumTitle(t, who) {
+  let s = baseTitle((t || '').replace(/\s*\[[^\]]*\]\s*/g, ' ')).replace(ROLE_CUT, '').trim();
+  const low = s.toLowerCase();
+  let cutAt = -1;
+  for (const n of who || []) {
+    for (const v of [n, n.replace(/^The\s+/i, '')]) {
+      const i = v.length > 2 ? low.indexOf(' ' + v.toLowerCase()) : -1;
+      if (i > 0 && (cutAt < 0 || i < cutAt)) cutAt = i;   // nazwisko w środku albo na końcu tytułu
+    }
+  }
+  if (cutAt > 0) s = s.slice(0, cutAt);
+  return s.replace(/[\s.,:;\/-]+$/, '').trim();
+}
 const phrase = (s) => '"' + s.replace(/[\\"]/g, '\\$&') + '"';
 
 // Zerwane połączenie (np. „fetch failed”) ponawiamy kilka razy, zanim uznamy płytę za błąd.
@@ -68,7 +87,7 @@ async function hasCover(rg) {
 }
 
 async function match(r) {
-  const title = baseTitle(r.t);
+  const title = albumTitle(r.t, r.d);
   const who = r.d || [];
   if (!title || !who.length) return null;      // bez wykonawcy (składanki) łatwo o cudzą okładkę
   const q = `releasegroup:${phrase(title)} AND artist:${phrase(who[0])}`;
@@ -98,7 +117,7 @@ async function match(r) {
     return null;
   }
   // pierwsza pasująca grupa z okładką; jeśli żadna nie ma okładki, zapamiętujemy samo dopasowanie
-  const meta = (g) => ({ date: g['first-release-date'] || '', types: typesOf(g) });
+  const meta = (g) => ({ date: g['first-release-date'] || '', types: typesOf(g), title: g.title || '' });
   for (const g of cands.slice(0, 2)) if (await hasCover(g.id)) return { rg: g.id, cover: `${CAA_PUBLIC}/release-group/${g.id}/front-250`, ...meta(g) };
   return { rg: cands[0].id, cover: null, ...meta(cands[0]) };
 }
@@ -107,12 +126,13 @@ const now = Date.now();
 const apply = (r, c) => {
   if (c && !c.miss) {
     r.mb = c.rg; if (c.cover) r.cv = c.cover; else delete r.cv; if (c.date) r.p = c.date;
+    if (c.title) r.t = c.title;                           // czysty tytuł albumu zamiast katalogowego z doklejkami
     if (c.types) r.tp = c.types;                          // np. "Album", "Album+Live", "Album+Compilation"
     if (c.pop && c.pop.u != null) r.pu = c.pop.u;          // słuchacze w ListenBrainz
   }
 };
 // Dopasowania sprzed v10 nie mają daty pierwszego wydania: dociągamy ją jednym zapytaniem o grupę wydań.
-const needsDate = (c) => c && !c.miss && (c.date === undefined || c.types === undefined);
+const needsDate = (c) => c && !c.miss && (c.date === undefined || c.types === undefined || c.title === undefined);
 for (const r of data.recs) apply(r, cache[r.id]);
 // stan po nałożeniu cache; „zmiana” to tylko to, co przybyło z nowych zapytań
 const before = new Map(data.recs.map((r) => [r.id, [r.cv, r.p, r.tp, r.pu].join('|')]));
@@ -121,7 +141,7 @@ const todo = data.recs.filter((r) => {
   const c = cache[r.id];
   if (needsDate(c)) return true;
   if (!(r.d || []).length) return false;
-  return !c || (c.miss && now - c.at > RETRY_MISSES_AFTER_DAYS * 864e5);
+  return !c || (c.miss && ((c.mv || 1) < MATCHER || now - c.at > RETRY_MISSES_AFTER_DAYS * 864e5));
 }).sort((a, b) => b.h.length - a.h.length || Number(b.y || 0) - Number(a.y || 0)); // najpierw płyty z największą liczbą egzemplarzy
 
 let asked = 0, hits = 0, covers = 0, failures = 0, dated = 0;
@@ -132,12 +152,14 @@ for (const r of todo) {
       const g = await mb(`/ws/2/release-group/${encodeURIComponent(cache[r.id].rg)}?fmt=json`);
       cache[r.id].date = g['first-release-date'] || '';
       cache[r.id].types = typesOf(g);
+      cache[r.id].title = g.title || '';
       dated++; apply(r, cache[r.id]);
       continue;
     }
     const m = await match(r);
     asked++;
-    const c = m ? { v: MATCH_VERSION, at: now, rg: m.rg, cover: m.cover, date: m.date, types: m.types } : { v: MATCH_VERSION, at: now, miss: true };
+    const c = m ? { v: MATCH_VERSION, mv: MATCHER, at: now, rg: m.rg, cover: m.cover, date: m.date, types: m.types, title: m.title }
+      : { v: MATCH_VERSION, mv: MATCHER, at: now, miss: true };
     cache[r.id] = c;
     if (m) { hits++; if (m.cover) covers++; }
     apply(r, c);
