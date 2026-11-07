@@ -100,7 +100,7 @@ async function match(r) {
 }
 
 const now = Date.now();
-let asked = 0, hits = 0, done = 0;
+let asked = 0, hits = 0, done = 0, dated = 0;
 const todo = data.recs.map((r, i) => i);
 
 async function worker() {
@@ -117,23 +117,35 @@ async function worker() {
               title: m.hit.title || m.hit.name || '', orig: m.hit.original_title || m.hit.original_name || '',
               poster: m.hit.poster_path ? IMG + m.hit.poster_path : null,
               rating: m.hit.vote_average ? Math.round(m.hit.vote_average * 10) / 10 : null,
-              votes: m.hit.vote_count || 0, overview: (m.hit.overview || '').slice(0, 600) }
+              votes: m.hit.vote_count || 0, overview: (m.hit.overview || '').slice(0, 600),
+              date: m.hit.release_date || m.hit.first_air_date || '' }
           : { v: MATCH_VERSION, at: now, miss: true };
         cache[r.id] = c;
         await sleep(40);
       } catch (e) { process.stderr.write(`\n${r.t}: ${e.message}\n`); c = null; }
+    }
+    // Wpisy z cache sprzed v10 nie mają daty premiery: dociągamy ją jednym zapytaniem o szczegóły.
+    if (c && !c.miss && c.date === undefined) {
+      try {
+        const d = await tmdb(`/${c.kind}/${c.id}`);
+        c.date = d.release_date || d.first_air_date || '';
+        dated++;
+        await sleep(25);
+      } catch (e) { process.stderr.write(`\n${r.t} (data premiery): ${e.message}\n`); }
     }
     if (c && !c.miss) {
       hits++;
       // Tytuł z katalogu bywa pomieszany; polski tytuł z TMDB jest czystszy.
       if (c.kind === 'movie' && c.title) { r.t = c.title; r.o = c.orig && norm(c.orig) !== norm(c.title) ? c.orig : undefined; }
       r.tmdb = { id: c.id, kind: c.kind, poster: c.poster, rating: c.rating, votes: c.votes, overview: c.overview };
+      // data premiery (seriale: pierwszy odcinek); strona pokazuje ją zamiast roku wydania płyty
+      if (c.date) r.p = c.date;
     }
     if (++done % 250 === 0) process.stderr.write(`${done}/${data.recs.length} · z okładką ${hits} · nowe zapytania ${asked}\n`);
   }
 }
 
 await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-process.stderr.write(`Gotowe: ${data.recs.length} filmów, z okładką ${hits}, nowe dopasowania ${asked}\n`);
+process.stderr.write(`Gotowe: ${data.recs.length} filmów, z okładką ${hits}, nowe dopasowania ${asked}, dociągnięte daty premiery ${dated}\n`);
 if (cachePath) writeFileSync(cachePath, JSON.stringify(cache));
 process.stdout.write(JSON.stringify(data));

@@ -73,30 +73,39 @@ async function match(r) {
   }).sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (a['primary-type'] === 'Album' ? -1 : 0) - (b['primary-type'] === 'Album' ? -1 : 0));
   if (!cands.length) return null;
   // pierwsza pasująca grupa z okładką; jeśli żadna nie ma okładki, zapamiętujemy samo dopasowanie
-  for (const g of cands.slice(0, 2)) if (await hasCover(g.id)) return { rg: g.id, cover: `${CAA_PUBLIC}/release-group/${g.id}/front-250` };
-  return { rg: cands[0].id, cover: null };
+  for (const g of cands.slice(0, 2)) if (await hasCover(g.id)) return { rg: g.id, cover: `${CAA_PUBLIC}/release-group/${g.id}/front-250`, date: g['first-release-date'] || '' };
+  return { rg: cands[0].id, cover: null, date: cands[0]['first-release-date'] || '' };
 }
 
 const now = Date.now();
-const before = new Map(data.recs.map((r) => [r.id, r.cv || '']));
+const before = new Map(data.recs.map((r) => [r.id, (r.cv || '') + '|' + (r.p || '')]));
 const apply = (r, c) => {
-  if (c && !c.miss) { r.mb = c.rg; if (c.cover) r.cv = c.cover; else delete r.cv; }
+  if (c && !c.miss) { r.mb = c.rg; if (c.cover) r.cv = c.cover; else delete r.cv; if (c.date) r.p = c.date; }
 };
+// Dopasowania sprzed v10 nie mają daty pierwszego wydania: dociągamy ją jednym zapytaniem o grupę wydań.
+const needsDate = (c) => c && !c.miss && c.date === undefined;
 for (const r of data.recs) apply(r, cache[r.id]);
 
 const todo = data.recs.filter((r) => {
   const c = cache[r.id];
+  if (needsDate(c)) return true;
   if (!(r.d || []).length) return false;
   return !c || (c.miss && now - c.at > RETRY_MISSES_AFTER_DAYS * 864e5);
 }).sort((a, b) => b.h.length - a.h.length || Number(b.y || 0) - Number(a.y || 0)); // najpierw płyty z największą liczbą egzemplarzy
 
-let asked = 0, hits = 0, covers = 0, failures = 0;
+let asked = 0, hits = 0, covers = 0, failures = 0, dated = 0;
 for (const r of todo) {
   if (outOfTime()) break;
   try {
+    if (needsDate(cache[r.id])) {
+      const g = await mb(`/ws/2/release-group/${encodeURIComponent(cache[r.id].rg)}?fmt=json`);
+      cache[r.id].date = g['first-release-date'] || '';
+      dated++; apply(r, cache[r.id]);
+      continue;
+    }
     const m = await match(r);
     asked++;
-    const c = m ? { v: MATCH_VERSION, at: now, rg: m.rg, cover: m.cover } : { v: MATCH_VERSION, at: now, miss: true };
+    const c = m ? { v: MATCH_VERSION, at: now, rg: m.rg, cover: m.cover, date: m.date } : { v: MATCH_VERSION, at: now, miss: true };
     cache[r.id] = c;
     if (m) { hits++; if (m.cover) covers++; }
     apply(r, c);
@@ -109,8 +118,8 @@ for (const r of todo) {
 }
 
 const withCover = data.recs.filter((r) => r.cv).length;
-const changed = data.recs.filter((r) => (r.cv || '') !== before.get(r.id)).length;
-const left = todo.length - asked;
+const changed = data.recs.filter((r) => (r.cv || '') + '|' + (r.p || '') !== before.get(r.id)).length;
+const left = todo.length - asked - dated;
 log(`Gotowe: sprawdzone teraz ${asked}, dopasowane ${hits}, z okładką ${covers}; okładki ma ${withCover}/${data.recs.length} płyt; zostało do sprawdzenia ${left}\n`);
 if (cachePath) writeFileSync(cachePath, JSON.stringify(cache));
 if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed > 0}\n`);
@@ -118,5 +127,5 @@ if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMM
   '### Muzyka: okładki z MusicBrainz', '', '| | |', '|---|---|',
   `| Sprawdzone w tym przebiegu | ${asked} |`, `| Dopasowane / z okładką | ${hits} / ${covers} |`,
   `| Płyty z okładką na stronie | ${withCover} z ${data.recs.length} |`, `| Zostało do sprawdzenia | ${left} |`,
-  `| Błędy zapytań | ${failures} |`, '', ''].join('\n'));
+  `| Dociągnięte daty pierwszego wydania | ${dated} |`, `| Błędy zapytań | ${failures} |`, '', ''].join('\n'));
 process.stdout.write(JSON.stringify(data));

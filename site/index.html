@@ -248,6 +248,8 @@ function hash(s){let h=2166136261;for(const c of s){h^=c.charCodeAt(0);h=Math.im
 const flip = n => { const m = (n||'').match(/^([^,]+),\s*([^,]+)$/); return m ? `${m[2]} ${m[1]}` : n; };
 const plural = (n, one, few, many) => n===1 ? one : (n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20)) ? few : many;
 const fmtDate = s => new Date(s + 'T12:00:00').toLocaleDateString('pl-PL', {day:'numeric', month:'long', year:'numeric'});
+// data z TMDB/MusicBrainz bywa pełna (1994-10-14), z samym miesiącem (1994-10) albo samym rokiem
+const fmtPart = s => s.length >= 10 ? fmtDate(s.slice(0,10)) : s.length === 7 ? new Date(s + '-15T12:00:00').toLocaleDateString('pl-PL', {month:'long', year:'numeric'}) : s;
 const HEART = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-9.3-9.2C1.4 7.9 3.6 4.5 7 4.5c2 0 3.4 1.1 5 3 1.6-1.9 3-3 5-3 3.4 0 5.6 3.4 4.3 6.8-1.8 4.6-9.3 9.2-9.3 9.2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 
 // Proste gatunki zamiast katalogowych ("Dramat filmowy" → Dramat)
@@ -263,7 +265,7 @@ const SIMPLE = {
 };
 const MODES = {
   films: { file:'films.json', noun:['film','filmy','filmów'], who:'Reżyseria', search:'Tytuł, reżyser, gatunek…', status:['Na półce','Wypożyczony'],
-    fmtName:{DVD:'DVD',BD:'Blu-ray'}, link:'Zwiastun', linkQ:r=>`${r.o||r.t} ${r.y||''} zwiastun`,
+    fmtName:{DVD:'DVD',BD:'Blu-ray'}, link:'Zwiastun', linkQ:r=>`${r.o||r.t} ${r.yr} zwiastun`,
     wlHead:'Sprawdź swoją listę filmów', wlPh:'Albo wklej tytuły, po jednym w wierszu:\nDiuna\nOppenheimer\nChłopi',
     sorts:[['year','Najnowsze filmy'],['new','Nowe w bibliotece'],['top','Najwyżej oceniane'],['avail','Najwięcej dostępnych'],['title','Tytuł A–Z'],['old','Najstarsze']] },
   music: { file:'music.json', noun:['płyta','płyty','płyt'], who:'Wykonawca', search:'Album, wykonawca, gatunek…', status:['Na półce','Wypożyczona'],
@@ -282,7 +284,10 @@ async function load(mode){
     const who = (r.d||[]).map(flip);
     const G = SIMPLE[mode].filter(([,re]) => (r.g||[]).some(g => re.test(g))).map(([n]) => n);
     const rate = r.tmdb?.rating && r.tmdb.votes >= 20 ? r.tmdb.rating : null;
-    return {...r, c:r.c||[], g:r.g||[], d:who, G, rate, fs:r.fs||[r.f], alt:r.alt||[], yn:Number(r.y)||0,
+    // rok premiery filmu / pierwszego wydania albumu (TMDB, MusicBrainz); bez niego rok wydania płyty z katalogu
+    const py = Number((r.p||'').slice(0,4)) || 0;
+    const yn = py || Number(r.y) || 0;
+    return {...r, c:r.c||[], g:r.g||[], d:who, G, rate, fs:r.fs||[r.f], alt:r.alt||[], yn, yr: yn ? String(yn) : '', py,
       img: r.tmdb?.poster || r.cv || '', isNew: !!r.n && r.n >= newSince,
       key: norm(r.t + ' ' + (r.o||'') + ' ' + who.join(' '))};
   });
@@ -392,8 +397,8 @@ function card(r){
     <button class="open" aria-label="${esc(r.t)}${r.d[0]?', '+esc(r.d[0]):''}${r.isNew?', nowość':''}">
       <div class="case${img?' has-poster':''}"><div class="art" style="background:${coverStyle(r)}"></div>${img?`<img class="poster" src="${img}" alt="" loading="lazy" onerror="this.parentNode.classList.remove('has-poster');this.remove()">`:''}
         ${tl?`<div class="tl">${tl}</div>`:''}${state.watch?'<span class="badge wl">Z listy</span>':''}<span class="badge fmt">${esc(fmtLabel(r))}</span>
-        <div class="txt"><span></span><span class="ttl">${esc(r.t)}</span><span class="yr">${esc(r.y||'')}${state.mode==='films'&&r.c[0]?' · '+esc(r.c[0]):''}</span></div></div>
-      <div class="under">${img?`<span class="t2">${esc(r.t)}</span>`:''}<span class="dir">${esc(r.d[0]||r.g[0]||'')}${img&&r.y?' · '+esc(r.y):''}</span>${pill}</div>
+        <div class="txt"><span></span><span class="ttl">${esc(r.t)}</span><span class="yr">${esc(r.yr)}${state.mode==='films'&&r.c[0]?' · '+esc(r.c[0]):''}</span></div></div>
+      <div class="under">${img?`<span class="t2">${esc(r.t)}</span>`:''}<span class="dir">${esc(r.d[0]||r.g[0]||'')}${img&&r.yr?' · '+esc(r.yr):''}</span>${pill}</div>
     </button></article>`;
 }
 function render(){
@@ -433,7 +438,7 @@ function openSheet(id){
     <div class="head">
       <div class="thumb">${r.img?`<img src="${r.img}" alt="">`:`<div style="position:absolute;inset:0;background:${coverStyle(r)}"></div>`}</div>
       <div><h2 id="sTitle">${esc(r.t)}</h2>${r.o?`<p class="orig">${esc(r.o)}</p>`:''}
-        <p class="stat">${esc(r.y||'')} · ${esc(fmtLabel(r))}${r.rate?` · ★ ${r.rate.toFixed(1)}`:''}<br>
+        <p class="stat">${esc(r.yr)} · ${esc(fmtLabel(r))}${r.rate?` · ★ ${r.rate.toFixed(1)}`:''}<br>
         ${r.h.length ? (nOk ? `<b>Na półce w ${nOk} z ${r.h.length} ${plural(r.h.length,'miejsca','miejsc','miejsc')}</b>` : `<b class="no">Wszystkie egzemplarze wypożyczone</b>`) : ''}</p></div>
     </div>
     <div class="actions">
@@ -449,6 +454,8 @@ function openSheet(id){
       ${r.c.length?`<dt>Kraj</dt><dd>${esc(r.c.join(', '))}</dd>`:''}
       ${r.g.length?`<dt>Gatunek</dt><dd>${esc(r.g.join(', '))}</dd>`:''}
       ${r.a?`<dt>Dla kogo</dt><dd>${esc(r.a)}</dd>`:''}
+      ${r.py?`<dt>${state.mode==='films'?(r.tmdb?.kind==='tv'?'Premiera serialu':'Premiera'):'Pierwsze wydanie'}</dt><dd>${esc(fmtPart(r.p))}</dd>`:''}
+      ${r.py&&r.y&&Number(r.y)!==r.py?`<dt>Wydanie płyty</dt><dd>${esc(r.y)}</dd>`:''}
       ${r.n?`<dt>W katalogu od</dt><dd>${esc(fmtDate(r.n))}${r.isNew?' · nowość':''}</dd>`:''}
       <dt>Wypożyczenie</dt><dd>14 dni</dd>
     </dl>
