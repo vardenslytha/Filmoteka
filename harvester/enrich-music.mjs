@@ -4,7 +4,7 @@
 // Dlatego skrypt pracuje porcjami: MB_MINUTES ogranicza czas, cache trzyma wyniki między uruchomieniami,
 // a płyty bez wpisu w cache po prostu czekają na kolejny przebieg.
 
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, appendFileSync, renameSync } from 'node:fs';
 
 // *_HOST tylko do testów
 const MB = process.env.MB_HOST || 'https://musicbrainz.org';
@@ -19,6 +19,8 @@ const MATCHER = 2;
 const MB_GAP_MS = Number(process.env.MB_GAP_MS || 1100);     // odstęp między zapytaniami do MusicBrainz
 const MINUTES = Number(process.env.MB_MINUTES || 15);
 const RETRY_MISSES_AFTER_DAYS = 60;
+const REQ_TIMEOUT_MS = Number(process.env.REQ_TIMEOUT_MS || 30000); // zawieszone połączenie przerywamy po 30 s
+const SAVE_EVERY = 100;                                            // co tyle zapytań zapisujemy cache na dysk
 
 const dataPath = process.argv[2] || 'music.json';
 const cachePath = process.argv[3];
@@ -29,6 +31,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (s) => process.stderr.write(s);
 const started = Date.now();
 const outOfTime = () => Date.now() - started > MINUTES * 60000;
+
+// Cache zapisujemy co SAVE_EVERY zapytań i przy przerwaniu (anulowanie, limit czasu joba),
+// żeby przerwany przebieg nie tracił całej porcji. Zapis przez plik tymczasowy, więc nigdy nie zostaje połówka.
+let dirty = 0;
+function saveCache(why = '') {
+  if (!cachePath || !dirty) return;
+  writeFileSync(cachePath + '.tmp', JSON.stringify(cache));
+  renameSync(cachePath + '.tmp', cachePath);
+  dirty = 0;
+  if (why) log(`Zapisano cache (${why}).\n`);
+}
+const touch = () => { if (++dirty >= SAVE_EVERY) saveCache(); };
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { saveCache(`przerwanie ${sig}`); process.exit(130); });
 
 const norm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ł/g, 'l')
   .replace(/&/g, ' and ').replace(/^(the|a|an)\s+/, '').replace(/[^a-z0-9]+/g, ' ').trim();
@@ -54,8 +69,9 @@ function albumTitle(t, who) {
 const phrase = (s) => '"' + s.replace(/[\\"]/g, '\\$&') + '"';
 
 // Zerwane połączenie (np. „fetch failed”) ponawiamy kilka razy, zanim uznamy płytę za błąd.
-async function get(url, opts, tries = 0) {
-  try { return await fetch(url, opts); }
+// Każde zapytanie ma limit czasu, inaczej jedno zawieszone połączenie potrafi czekać kilka minut.
+async function get(url, opts = {}, tries = 0) {
+  try { return await fetch(url, { ...opts, signal: AbortSignal.timeout(REQ_TIMEOUT_MS) }); }
   catch (e) {
     if (tries >= 3) { const err = new Error(`${e.message}${e.cause?.code ? ' (' + e.cause.code + ')' : ''} – ${new URL(url).host}`); throw err; }
     await sleep(2000 * (tries + 1));
@@ -153,14 +169,14 @@ for (const r of todo) {
       cache[r.id].date = g['first-release-date'] || '';
       cache[r.id].types = typesOf(g);
       cache[r.id].title = g.title || '';
-      dated++; apply(r, cache[r.id]);
+      dated++; touch(); apply(r, cache[r.id]);
       continue;
     }
     const m = await match(r);
     asked++;
     const c = m ? { v: MATCH_VERSION, mv: MATCHER, at: now, rg: m.rg, cover: m.cover, date: m.date, types: m.types, title: m.title }
       : { v: MATCH_VERSION, mv: MATCHER, at: now, miss: true };
-    cache[r.id] = c;
+    cache[r.id] = c; touch();
     if (m) { hits++; if (m.cover) covers++; }
     apply(r, c);
   } catch (e) {
@@ -170,6 +186,8 @@ for (const r of todo) {
   }
   if (asked % 200 === 0 && asked) log(`[${((Date.now() - started) / 60000).toFixed(1)} min] sprawdzone ${asked}/${todo.length} · dopasowane ${hits} · z okładką ${covers}\n`);
 }
+
+saveCache();
 
 // ---------- popularność z ListenBrainz ----------
 // Liczba słuchaczy grupy wydań (otwarte dane MetaBrainz, bez klucza, po 50 identyfikatorów na zapytanie).
@@ -200,7 +218,7 @@ let popAsked = 0, popFailures = 0;
       for (const row of Array.isArray(rows) ? rows : []) {
         for (const c of due.get(row.release_group_mbid) || []) c.pop = { at: now, u: row.total_user_count ?? 0, l: row.total_listen_count ?? 0 };
       }
-      popAsked += batch.length;
+      popAsked += batch.length; dirty++;
     } catch (e) {
       popFailures++; log(`ListenBrainz: ${e.message}\n`);
       if (popFailures > 5) break;
@@ -218,7 +236,7 @@ log(`Gotowe: sprawdzone teraz ${asked}, dopasowane ${hits}, z okładką ${covers
 log(`Bez dopasowania: ${Object.entries(misses).map(([k, v]) => `${k} ${v}`).join(', ') || '–'}\n`);
 for (const m of missSamples) log(`  bez dopasowania: ${m}\n`);
 log(`ListenBrainz: sprawdzone grupy wydań ${popAsked}, błędy ${popFailures}; płyty z popularnością ${data.recs.filter((r) => r.pu > 0).length}\n`);
-if (cachePath && asked + dated + popAsked > 0) writeFileSync(cachePath, JSON.stringify(cache));
+saveCache();
 if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed > 0}\nremaining=${left}\n`);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
   '### Muzyka: okładki z MusicBrainz', '', '| | |', '|---|---|',
