@@ -2,8 +2,8 @@ name: Odśwież półkę
 
 on:
   schedule:
-    - cron: '17 2 * * *'
-  workflow_dispatch:
+    - cron: '17 1 * * *'   # codziennie ok. 2:17 w Polsce (cron w UTC)
+  workflow_dispatch:        # przycisk "Run workflow" do ręcznego uruchomienia
   push:
     branches: [main]
     paths: ['site/index.html', 'harvester/**', '.github/workflows/**']
@@ -15,21 +15,21 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true   # nowy przebieg anuluje stary, nie czekają w kolejce
 
 jobs:
-  build:
+  # Filmy i muzyka pobierają się równolegle, każde w swoim zadaniu.
+  films:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Pobierz filmy z katalogu Biblioteki Raczyńskich
-        run: node harvester/harvest.mjs 2000 "$(date +%Y)" > films.json
+        run: RTYPE=videos node harvester/harvest.mjs > films-raw.json
 
       - name: Przywróć cache okładek
         uses: actions/cache@v4
@@ -38,10 +38,53 @@ jobs:
           key: tmdb-${{ github.run_id }}
           restore-keys: tmdb-
 
-      - name: Dociągnij okładki z TMDB
+      - name: Dociągnij okładki filmów z TMDB
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-        run: node harvester/enrich-tmdb.mjs films.json tmdb-cache.json > site/films.json
+        run: node harvester/enrich-tmdb.mjs films-raw.json tmdb-cache.json > films.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: films
+          path: films.json
+          retention-days: 3
+
+  music:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Pobierz muzykę z katalogu Biblioteki Raczyńskich
+        run: RTYPE=audios node harvester/harvest.mjs > music.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: music
+          path: music.json
+          retention-days: 3
+
+  build:
+    needs: [films, music]
+    # strona publikuje się nawet wtedy, gdy pobieranie muzyki się nie uda
+    if: ${{ !cancelled() && needs.films.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: films
+          path: site
+
+      - uses: actions/download-artifact@v4
+        if: ${{ needs.music.result == 'success' }}
+        with:
+          name: music
+          path: site
 
       - uses: actions/configure-pages@v5
 
@@ -51,6 +94,7 @@ jobs:
 
   deploy:
     needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
