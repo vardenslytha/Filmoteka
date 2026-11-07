@@ -82,13 +82,19 @@ async function get(url, opts = {}, tries = 0) {
 const misses = {}, missSamples = [];
 // "Album", "Album+Live", "Album+Compilation", "EP"… – typ główny i dodatkowe z MusicBrainz
 const typesOf = (g) => [g['primary-type'] || '', ...(g['secondary-types'] || [])].filter(Boolean).join('+');
-let lastMb = 0;
+// Limit MusicBrainz to 1 zapytanie na sekundę liczone od startu zapytań, nie liczba otwartych naraz.
+// Kolejne zapytanie dostaje termin startu z góry (rezerwacja), więc kilka równoległych płyt nigdy nie przekroczy tempa.
+let nextMb = 0;
 async function mb(path, tries = 0) {
-  const wait = lastMb + MB_GAP_MS - Date.now();
-  if (wait > 0) await sleep(wait);
-  lastMb = Date.now();
+  const slot = Math.max(Date.now(), nextMb);
+  nextMb = slot + MB_GAP_MS;
+  if (slot > Date.now()) await sleep(slot - Date.now());
   const res = await get(`${MB}${path}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
-  if ((res.status === 503 || res.status === 429) && tries < 4) { await sleep(3000 * (tries + 1)); return mb(path, tries + 1); }
+  if ((res.status === 503 || res.status === 429) && tries < 4) {
+    // MusicBrainz prosi o zwolnienie: przesuwamy terminy wszystkich czekających zapytań, nie tylko tego jednego
+    nextMb = Math.max(nextMb, Date.now() + 3000 * (tries + 1));
+    return mb(path, tries + 1);
+  }
   if (!res.ok) throw new Error(`MusicBrainz HTTP ${res.status}`);
   return res.json();
 }
@@ -166,8 +172,8 @@ const todo = data.recs.filter((r) => {
 }).sort((a, b) => b.h.length - a.h.length || Number(b.y || 0) - Number(a.y || 0)); // najpierw płyty z największą liczbą egzemplarzy
 
 let asked = 0, hits = 0, covers = 0, failures = 0, dated = 0;
-const COVER_PARALLEL = 4;          // ile sprawdzeń okładek naraz czeka w tle
-const pending = new Set();
+// Kilka płyt naraz: każda czeka na swoje odpowiedzi (MusicBrainz ~1–2 s, okładka), a tempo pilnuje mb().
+const MB_PARALLEL = Number(process.env.MB_PARALLEL || 3);
 const fail = (r, e) => { failures++; log(`${r.t}: ${e.message}\n`); };
 function save(r, m) {
   asked++;
@@ -178,26 +184,27 @@ function save(r, m) {
   apply(r, c);
   if (asked % 200 === 0) log(`[${((Date.now() - started) / 60000).toFixed(1)} min] sprawdzone ${asked}/${todo.length} · dopasowane ${hits} · z okładką ${covers}\n`);
 }
-for (const r of todo) {
-  if (outOfTime()) break;
-  if (failures > 30) { log('Za dużo błędów MusicBrainz, kończę tę porcję.\n'); break; }
-  try {
-    if (needsDate(cache[r.id])) {
-      const g = await mb(`/ws/2/release-group/${encodeURIComponent(cache[r.id].rg)}?fmt=json`);
-      cache[r.id].date = g['first-release-date'] || '';
-      cache[r.id].types = typesOf(g);
-      cache[r.id].title = g.title || '';
-      dated++; touch(); apply(r, cache[r.id]);
-      continue;
-    }
-    const cands = await match(r);
-    if (!cands) { save(r, null); continue; }
-    while (pending.size >= COVER_PARALLEL) await Promise.race(pending);
-    const p = pickCover(cands).then((m) => save(r, m), (e) => fail(r, e)).finally(() => pending.delete(p));
-    pending.add(p);
-  } catch (e) { fail(r, e); }
+async function one(r) {
+  if (needsDate(cache[r.id])) {
+    const g = await mb(`/ws/2/release-group/${encodeURIComponent(cache[r.id].rg)}?fmt=json`);
+    cache[r.id].date = g['first-release-date'] || '';
+    cache[r.id].types = typesOf(g);
+    cache[r.id].title = g.title || '';
+    dated++; touch(); apply(r, cache[r.id]);
+    return;
+  }
+  const cands = await match(r);
+  save(r, cands ? await pickCover(cands) : null);
 }
-await Promise.all(pending);
+let next = 0, tooMany = false;
+async function worker() {
+  while (next < todo.length && !outOfTime() && !tooMany) {
+    const r = todo[next++];
+    try { await one(r); } catch (e) { fail(r, e); }
+    if (failures > 30 && !tooMany) { tooMany = true; log('Za dużo błędów MusicBrainz, kończę tę porcję.\n'); }
+  }
+}
+await Promise.all(Array.from({ length: MB_PARALLEL }, worker));
 
 saveCache();
 
