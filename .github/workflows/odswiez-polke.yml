@@ -1,9 +1,13 @@
 name: Odśwież półkę
 
+# Każdy przebieg pobiera porcję katalogu (do ok. 45 min), zapisuje postęp i publikuje stronę.
+# Następny przebieg wznawia od miejsca, w którym skończył poprzedni. Po pełnym cyklu
+# przez ok. 20 h przebiegi kończą się od razu, bez zapytań do katalogu.
+
 on:
   schedule:
-    - cron: '17 0 * * *'   # codziennie ok. 1:17 w Polsce (cron w UTC); pełne pobranie trwa ok. 2 h
-  workflow_dispatch:        # przycisk "Run workflow" do ręcznego uruchomienia
+    - cron: '17 * * * *'     # co godzinę (cron w UTC)
+  workflow_dispatch:          # przycisk "Run workflow" do ręcznego uruchomienia
   push:
     branches: [main]
     paths: ['site/index.html', 'harvester/**', '.github/workflows/**']
@@ -15,35 +19,73 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true   # nowy przebieg anuluje stary, nie czekają w kolejce
+  cancel-in-progress: false   # nie przerywamy trwającego pobierania; nowy przebieg poczeka
 
 jobs:
-  # Filmy i muzyka pobierają się równolegle, każde w swoim zadaniu.
   films:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 70
+    outputs:
+      state: ${{ steps.harvest.outputs.state }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Pobierz filmy z katalogu Biblioteki Raczyńskich
-        run: RTYPE=videos node harvester/harvest.mjs > films-raw.json
+      - name: Przywróć postęp z poprzedniego przebiegu
+        uses: actions/cache/restore@v4
+        with:
+          path: films-checkpoint.json
+          key: films-ckpt-${{ github.run_id }}
+          restore-keys: films-ckpt-
+
+      - name: Pobierz opublikowane dane jako podstawę
+        run: |
+          SITE_URL="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}"
+          curl -fsSL "$SITE_URL/films.json" -o films-base.json || rm -f films-base.json
+
+      - name: Pobierz filmy z katalogu (porcja)
+        id: harvest
+        continue-on-error: true
+        env:
+          RTYPE: videos
+          CHECKPOINT: films-checkpoint.json
+          OUT: films-raw.json
+          BASE: films-base.json
+          MAX_MINUTES: '45'
+        run: node harvester/harvest.mjs
+
+      - name: Zapisz postęp
+        if: ${{ always() && hashFiles('films-checkpoint.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: films-checkpoint.json
+          key: films-ckpt-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Przywróć cache okładek
-        uses: actions/cache@v4
+        if: ${{ steps.harvest.outputs.state == 'complete' || steps.harvest.outputs.state == 'partial' }}
+        uses: actions/cache/restore@v4
         with:
           path: tmdb-cache.json
           key: tmdb-${{ github.run_id }}
           restore-keys: tmdb-
 
       - name: Dociągnij okładki filmów z TMDB
+        if: ${{ steps.harvest.outputs.state == 'complete' || steps.harvest.outputs.state == 'partial' }}
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: node harvester/enrich-tmdb.mjs films-raw.json tmdb-cache.json > films.json
 
+      - name: Zapisz cache okładek
+        if: ${{ always() && hashFiles('tmdb-cache.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: tmdb-cache.json
+          key: tmdb-${{ github.run_id }}-${{ github.run_attempt }}
+
       - uses: actions/upload-artifact@v4
+        if: ${{ steps.harvest.outputs.state == 'complete' || steps.harvest.outputs.state == 'partial' }}
         with:
           name: films
           path: films.json
@@ -51,17 +93,47 @@ jobs:
 
   music:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 70
+    outputs:
+      state: ${{ steps.harvest.outputs.state }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Pobierz muzykę z katalogu Biblioteki Raczyńskich
-        run: RTYPE=audios node harvester/harvest.mjs > music.json
+      - name: Przywróć postęp z poprzedniego przebiegu
+        uses: actions/cache/restore@v4
+        with:
+          path: music-checkpoint.json
+          key: music-ckpt-${{ github.run_id }}
+          restore-keys: music-ckpt-
+
+      - name: Pobierz opublikowane dane jako podstawę
+        run: |
+          SITE_URL="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}"
+          curl -fsSL "$SITE_URL/music.json" -o music-base.json || rm -f music-base.json
+
+      - name: Pobierz muzykę z katalogu (porcja)
+        id: harvest
+        continue-on-error: true
+        env:
+          RTYPE: audios
+          CHECKPOINT: music-checkpoint.json
+          OUT: music.json
+          BASE: music-base.json
+          MAX_MINUTES: '45'
+        run: node harvester/harvest.mjs
+
+      - name: Zapisz postęp
+        if: ${{ always() && hashFiles('music-checkpoint.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: music-checkpoint.json
+          key: music-ckpt-${{ github.run_id }}-${{ github.run_attempt }}
 
       - uses: actions/upload-artifact@v4
+        if: ${{ steps.harvest.outputs.state == 'complete' || steps.harvest.outputs.state == 'partial' }}
         with:
           name: music
           path: music.json
@@ -69,19 +141,29 @@ jobs:
 
   build:
     needs: [films, music]
-    # strona publikuje się nawet wtedy, gdy pobieranie muzyki się nie uda
-    if: ${{ !cancelled() && needs.films.result == 'success' }}
+    # publikujemy, gdy którekolwiek zadanie przyniosło nowe dane (pełne albo porcję)
+    if: >-
+      ${{ !cancelled() && (
+        needs.films.outputs.state == 'complete' || needs.films.outputs.state == 'partial' ||
+        needs.music.outputs.state == 'complete' || needs.music.outputs.state == 'partial') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Zachowaj obecnie opublikowane dane
+        run: |
+          SITE_URL="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}"
+          curl -fsSL "$SITE_URL/films.json" -o site/films.json.cur && mv site/films.json.cur site/films.json || rm -f site/films.json.cur
+          curl -fsSL "$SITE_URL/music.json" -o site/music.json || rm -f site/music.json
+
       - uses: actions/download-artifact@v4
+        if: ${{ needs.films.outputs.state == 'complete' || needs.films.outputs.state == 'partial' }}
         with:
           name: films
           path: site
 
       - uses: actions/download-artifact@v4
-        if: ${{ needs.music.result == 'success' }}
+        if: ${{ needs.music.outputs.state == 'complete' || needs.music.outputs.state == 'partial' }}
         with:
           name: music
           path: site
