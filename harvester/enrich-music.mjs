@@ -44,6 +44,7 @@ async function get(url, opts, tries = 0) {
   }
 }
 
+const misses = {}, missSamples = [];
 let lastMb = 0;
 async function mb(path, tries = 0) {
   const wait = lastMb + MB_GAP_MS - Date.now();
@@ -72,6 +73,8 @@ async function match(r) {
   const { 'release-groups': groups = [] } = await mb(`/ws/2/release-group/?query=${encodeURIComponent(q)}&fmt=json&limit=8`);
   const tk = norm(title), discYear = Number(r.y) || 0;
   const people = who.flatMap((n) => [norm(n), n.trim().includes(' ') ? surname(n) : null]).filter(Boolean);
+  // przy braku dopasowania zapamiętujemy, który warunek odpadł – do diagnozy w podsumowaniu
+  const why = { title: 0, who: 0, year: 0, score: 0 };
   const cands = groups.filter((g) => {
     const gt = norm(baseTitle(g.title));
     const titleOk = gt === tk || gt.startsWith(tk + ' ') || tk.startsWith(gt + ' ');
@@ -79,22 +82,33 @@ async function match(r) {
     const whoOk = credits.some((c) => { const n = norm(c); return people.includes(n) || people.includes(surname(c)); });
     const y = Number((g['first-release-date'] || '').slice(0, 4));
     const yearOk = !discYear || !y || y <= discYear + 1;
-    return titleOk && whoOk && yearOk && (g.score ?? 100) >= 70;
+    const scoreOk = (g.score ?? 100) >= 70;
+    if (!titleOk) why.title++; else if (!whoOk) why.who++; else if (!yearOk) why.year++; else if (!scoreOk) why.score++;
+    return titleOk && whoOk && yearOk && scoreOk;
   }).sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (a['primary-type'] === 'Album' ? -1 : 0) - (b['primary-type'] === 'Album' ? -1 : 0));
-  if (!cands.length) return null;
+  if (!cands.length) {
+    const reason = !groups.length ? 'brak wyników' : why.title === groups.length ? 'tytuł' : why.who ? 'wykonawca' : why.year ? 'rok' : 'trafność';
+    misses[reason] = (misses[reason] || 0) + 1;
+    if (missSamples.length < 15) {
+      const g = groups[0];
+      missSamples.push(`${r.t} / ${who[0]} (${r.y || '?'}) → ${reason}${g ? `; MB: ${g.title} / ${(g['artist-credit'] || []).map((c) => c.name).join(', ')} (${(g['first-release-date'] || '?').slice(0, 4)}, ${g.score})` : ''}`);
+    }
+    return null;
+  }
   // pierwsza pasująca grupa z okładką; jeśli żadna nie ma okładki, zapamiętujemy samo dopasowanie
   for (const g of cands.slice(0, 2)) if (await hasCover(g.id)) return { rg: g.id, cover: `${CAA_PUBLIC}/release-group/${g.id}/front-250`, date: g['first-release-date'] || '' };
   return { rg: cands[0].id, cover: null, date: cands[0]['first-release-date'] || '' };
 }
 
 const now = Date.now();
-const before = new Map(data.recs.map((r) => [r.id, (r.cv || '') + '|' + (r.p || '')]));
 const apply = (r, c) => {
   if (c && !c.miss) { r.mb = c.rg; if (c.cover) r.cv = c.cover; else delete r.cv; if (c.date) r.p = c.date; }
 };
 // Dopasowania sprzed v10 nie mają daty pierwszego wydania: dociągamy ją jednym zapytaniem o grupę wydań.
 const needsDate = (c) => c && !c.miss && c.date === undefined;
 for (const r of data.recs) apply(r, cache[r.id]);
+// stan po nałożeniu cache; „zmiana” to tylko to, co przybyło z nowych zapytań
+const before = new Map(data.recs.map((r) => [r.id, (r.cv || '') + '|' + (r.p || '')]));
 
 const todo = data.recs.filter((r) => {
   const c = cache[r.id];
@@ -131,11 +145,13 @@ const withCover = data.recs.filter((r) => r.cv).length;
 const changed = data.recs.filter((r) => (r.cv || '') + '|' + (r.p || '') !== before.get(r.id)).length;
 const left = todo.length - asked - dated;
 log(`Gotowe: sprawdzone teraz ${asked}, dopasowane ${hits}, z okładką ${covers}; okładki ma ${withCover}/${data.recs.length} płyt; zostało do sprawdzenia ${left}\n`);
-if (cachePath) writeFileSync(cachePath, JSON.stringify(cache));
-if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed > 0}\n`);
+if (cachePath && asked + dated > 0) writeFileSync(cachePath, JSON.stringify(cache));
+if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed > 0}\nremaining=${left}\n`);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
   '### Muzyka: okładki z MusicBrainz', '', '| | |', '|---|---|',
   `| Sprawdzone w tym przebiegu | ${asked} |`, `| Dopasowane / z okładką | ${hits} / ${covers} |`,
   `| Płyty z okładką na stronie | ${withCover} z ${data.recs.length} |`, `| Zostało do sprawdzenia | ${left} |`,
-  `| Dociągnięte daty pierwszego wydania | ${dated} |`, `| Błędy zapytań | ${failures} |`, '', ''].join('\n'));
+  `| Dociągnięte daty pierwszego wydania | ${dated} |`, `| Błędy zapytań | ${failures} |`,
+  `| Bez dopasowania (powód) | ${Object.entries(misses).map(([k, v]) => `${k}: ${v}`).join(', ') || '–'} |`, '',
+  missSamples.length ? '**Przykłady bez dopasowania:**\n\n' + missSamples.map((m) => '- ' + m).join('\n') : '', '', ''].join('\n'));
 process.stdout.write(JSON.stringify(data));

@@ -12,7 +12,7 @@ Filmy i muzyka na płytach z katalogu Biblioteki Raczyńskich w Poznaniu, z dost
    ```
 3. **Settings → Secrets and variables → Actions → New repository secret**: nazwa `TMDB_API_KEY`, wartość: Twój klucz API (v3) z TMDB. Bez sekretu strona działa, tylko bez plakatów filmów. Okładki płyt nie wymagają klucza.
 4. **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-5. **Actions → Odśwież półkę → Run workflow**. Pełny cykl to kilka godzinnych porcji; strona publikuje się po każdej.
+5. **Actions → Pobierz katalog → Run workflow**. Pełny cykl to kilka godzinnych porcji; strona publikuje się po każdej.
 6. Adres strony pojawi się w podsumowaniu uruchomienia i w Settings → Pages: `https://TWOJ_LOGIN.github.io/polka-raczynskich/`.
 
 ## Co jest w środku
@@ -24,10 +24,12 @@ Filmy i muzyka na płytach z katalogu Biblioteki Raczyńskich w Poznaniu, z dost
 | `harvester/enrich-music.mjs` | Okładki płyt z MusicBrainz i Cover Art Archive (1 zapytanie/s, porcjami, z cache) |
 | `site/index.html` | Strona (bez frameworków, jeden plik) |
 | `site/films.json`, `site/music.json` | Dane; workflow tworzy je i publikuje |
-| `.github/workflows/odswiez-polke.yml` | Co godzinę porcja pobierania (do 45 min) z wznawianiem; filmy i muzyka równolegle; ręczny przycisk |
+| `.github/workflows/katalog.yml` | „Pobierz katalog”: tylko biblioteka, porcje do 45 min z wznawianiem; po każdej porcji zamawia publikację, a w toku cyklu kolejną porcję |
+| `.github/workflows/publikuj.yml` | „Wzbogać i opublikuj”: szybka publikacja z cache (ok. 2 min), potem nowe dopasowania TMDB i MusicBrainz (do 40 min) i druga publikacja |
 
 ## Warto wiedzieć
 
+- **Dwa workflow**: zmiana strony (`site/`) albo skryptów wzbogacania publikuje się od razu przez „Wzbogać i opublikuj”, bez czekania na pobieranie katalogu. Ręcznie: Actions → Wzbogać i opublikuj → Run workflow.
 - **Podsumowanie przebiegu**: w Actions kliknij przebieg; na jego stronie (Summary) jest tabelka dla filmów, muzyki i okładek: rekordy, strony, blokady, pominięte strony, luki w kontroli kompletności.
 - **Dostępność** jest aktualna na moment pobrania. W ciągu dnia mogła się zmienić; strona to mówi.
 - **GitHub wyłącza zaplanowane uruchomienia** w repo bez żadnej aktywności przez 60 dni. Dostaniesz wtedy maila; wystarczy kliknąć „Enable workflow” albo zrobić dowolny commit.

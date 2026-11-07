@@ -4,7 +4,7 @@
 // Bez klucza przepuszcza dane bez zmian. Klucz nigdy nie trafia do wyniku.
 // Cache trzyma dopasowania między uruchomieniami, więc co noc pyta TMDB tylko o nowe filmy.
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
 
 const envFile = new URL('./.env', import.meta.url);
 if (existsSync(envFile)) {
@@ -14,6 +14,8 @@ if (existsSync(envFile)) {
   }
 }
 const KEY = process.env.TMDB_API_KEY;
+// TMDB_LOOKUPS=0: tylko nałóż dopasowania z cache, bez zapytań (szybka publikacja)
+const LOOKUPS = process.env.TMDB_LOOKUPS !== '0';
 const dataPath = process.argv[2] || 'films.json';
 const cachePath = process.argv[3];
 const data = JSON.parse(readFileSync(dataPath, 'utf8'));
@@ -108,7 +110,7 @@ async function worker() {
     const r = data.recs[todo.shift()];
     let c = cache[r.id];
     const stale = c && c.miss && now - c.at > RETRY_MISSES_AFTER_DAYS * 864e5;
-    if (!c || stale) {
+    if ((!c || stale) && LOOKUPS) {
       try {
         const m = await match(r);
         asked++;
@@ -125,7 +127,7 @@ async function worker() {
       } catch (e) { process.stderr.write(`\n${r.t}: ${e.message}\n`); c = null; }
     }
     // Wpisy z cache sprzed v10 nie mają daty premiery: dociągamy ją jednym zapytaniem o szczegóły.
-    if (c && !c.miss && c.date === undefined) {
+    if (LOOKUPS && c && !c.miss && c.date === undefined) {
       try {
         const d = await tmdb(`/${c.kind}/${c.id}`);
         c.date = d.release_date || d.first_air_date || '';
@@ -147,5 +149,6 @@ async function worker() {
 
 await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 process.stderr.write(`Gotowe: ${data.recs.length} filmów, z okładką ${hits}, nowe dopasowania ${asked}, dociągnięte daty premiery ${dated}\n`);
-if (cachePath) writeFileSync(cachePath, JSON.stringify(cache));
+if (cachePath && LOOKUPS) writeFileSync(cachePath, JSON.stringify(cache));
+if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${asked + dated > 0}\n`);
 process.stdout.write(JSON.stringify(data));

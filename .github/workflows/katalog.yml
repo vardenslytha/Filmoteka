@@ -1,0 +1,139 @@
+name: Pobierz katalog
+
+# Tylko katalog biblioteki: porcje do ok. 45 min z wznawianiem. Wynik (surowe dane) trafia do cache GitHuba,
+# a publikację robi osobny workflow „Wzbogać i opublikuj”, zamawiany po każdej porcji.
+# Gdy cykl jest w toku, przebieg od razu zamawia następną porcję. Po pełnym cyklu przez ok. 20 h katalog nie jest odpytywany.
+
+on:
+  schedule:
+    - cron: '17 * * * *'     # zapas, gdyby łańcuch porcji się zatrzymał (cron w UTC; GitHub bywa z nim zawodny)
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['harvester/harvest.mjs', '.github/workflows/katalog.yml']
+
+permissions:
+  contents: read
+  actions: write              # zamawianie kolejnych przebiegów
+
+concurrency:
+  group: katalog
+  cancel-in-progress: false   # nie przerywamy trwającego pobierania
+
+jobs:
+  films:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      state: ${{ steps.harvest.outputs.state }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Przywróć postęp z poprzedniego przebiegu
+        uses: actions/cache/restore@v4
+        with:
+          path: films-checkpoint.json
+          key: films-ckpt-${{ github.run_id }}
+          restore-keys: films-ckpt-
+
+      - name: Pobierz opublikowane dane jako podstawę
+        run: |
+          SITE_URL="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}"
+          curl -fsSL "$SITE_URL/films.json" -o films-base.json || rm -f films-base.json
+
+      - name: Pobierz filmy z katalogu (porcja)
+        id: harvest
+        continue-on-error: true
+        env:
+          RTYPE: videos
+          CHECKPOINT: films-checkpoint.json
+          OUT: films-raw.json
+          BASE: films-base.json
+          MAX_MINUTES: '45'
+        run: node harvester/harvest.mjs
+
+      - name: Zapisz postęp
+        if: ${{ always() && hashFiles('films-checkpoint.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: films-checkpoint.json
+          key: films-ckpt-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Zapisz dane do publikacji
+        if: ${{ steps.harvest.outputs.state == 'complete' || steps.harvest.outputs.state == 'partial' }}
+        uses: actions/cache/save@v4
+        with:
+          path: films-raw.json
+          key: films-raw-${{ github.run_id }}-${{ github.run_attempt }}
+
+  music:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      state: ${{ steps.harvest.outputs.state }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Przywróć postęp z poprzedniego przebiegu
+        uses: actions/cache/restore@v4
+        with:
+          path: music-checkpoint.json
+          key: music-ckpt-${{ github.run_id }}
+          restore-keys: music-ckpt-
+
+      - name: Pobierz opublikowane dane jako podstawę
+        run: |
+          SITE_URL="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}"
+          curl -fsSL "$SITE_URL/music.json" -o music-base.json || rm -f music-base.json
+
+      - name: Pobierz muzykę z katalogu (porcja)
+        id: harvest
+        continue-on-error: true
+        env:
+          RTYPE: audios
+          CHECKPOINT: music-checkpoint.json
+          OUT: music-raw.json
+          BASE: music-base.json
+          MAX_MINUTES: '45'
+        run: node harvester/harvest.mjs
+
+      - name: Zapisz postęp
+        if: ${{ always() && hashFiles('music-checkpoint.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: music-checkpoint.json
+          key: music-ckpt-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Zapisz dane do publikacji
+        if: ${{ steps.harvest.outputs.state == 'complete' || steps.harvest.outputs.state == 'partial' }}
+        uses: actions/cache/save@v4
+        with:
+          path: music-raw.json
+          key: music-raw-${{ github.run_id }}-${{ github.run_attempt }}
+
+  dalej:
+    needs: [films, music]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Zamów publikację i kolejną porcję
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILMS: ${{ needs.films.outputs.state }}
+          MUSIC: ${{ needs.music.outputs.state }}
+        run: |
+          echo "Filmy: ${FILMS:-brak}, muzyka: ${MUSIC:-brak}"
+          case " $FILMS $MUSIC " in *" complete "*|*" partial "*)
+            gh workflow run publikuj.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+            echo "Zamówiona publikacja." ;;
+          esac
+          case " $FILMS $MUSIC " in *" partial "*)
+            gh workflow run katalog.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+            echo "Zamówiona kolejna porcja." ;;
+          esac

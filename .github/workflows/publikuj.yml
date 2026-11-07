@@ -1,0 +1,218 @@
+name: Wzbogać i opublikuj
+
+# 1) szybko: dane z katalogu + to, co już jest w cache TMDB i MusicBrainz → strona (ok. 2 min)
+# 2) potem: nowe dopasowania TMDB, okładki i daty z MusicBrainz (do 40 min) → strona jeszcze raz
+# Zmiana strony (site/**) albo skryptów wzbogacania publikuje się więc od razu, bez czekania na katalog.
+# Dopóki zostały płyty do sprawdzenia w MusicBrainz, przebieg zamawia następny.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['site/**', 'harvester/enrich-tmdb.mjs', 'harvester/enrich-music.mjs', '.github/workflows/publikuj.yml']
+  schedule:
+    - cron: '47 */6 * * *'   # zapas (cron w UTC)
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write
+
+env:
+  NODE_VERSION: 20
+
+jobs:
+  szybka:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main   # zawsze najnowsza strona, także gdy przebieg zamówiono ze starszego commitu
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Przywróć dane z katalogu (filmy)
+        uses: actions/cache/restore@v4
+        with:
+          path: films-raw.json
+          key: films-raw-${{ github.run_id }}
+          restore-keys: films-raw-
+      - name: Przywróć dane z katalogu (muzyka)
+        uses: actions/cache/restore@v4
+        with:
+          path: music-raw.json
+          key: music-raw-${{ github.run_id }}
+          restore-keys: music-raw-
+      - name: Przywróć cache TMDB
+        uses: actions/cache/restore@v4
+        with:
+          path: tmdb-cache.json
+          key: tmdb-${{ github.run_id }}
+          restore-keys: tmdb-
+      - name: Przywróć cache MusicBrainz
+        uses: actions/cache/restore@v4
+        with:
+          path: mb-cache.json
+          key: mb-${{ github.run_id }}
+          restore-keys: mb-
+
+      - name: Brakujące dane weź z opublikowanej strony
+        run: |
+          SITE_URL="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}"
+          for k in films music; do
+            [ -s "$k-raw.json" ] || curl -fsSL "$SITE_URL/$k.json" -o "$k-raw.json" || rm -f "$k-raw.json"
+          done
+          ls -la *-raw.json || true
+
+      - name: Nałóż okładki i daty z cache
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TMDB_LOOKUPS: '0'
+          MB_MINUTES: '0'
+        run: |
+          [ -s films-raw.json ] && node harvester/enrich-tmdb.mjs films-raw.json tmdb-cache.json > site/films.json
+          [ -s music-raw.json ] && node harvester/enrich-music.mjs music-raw.json mb-cache.json > site/music.json
+          ls -la site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+          name: strona-szybka
+      - id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: strona-szybka
+
+  wzbogac:
+    needs: szybka
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    concurrency:
+      group: wzbogacanie
+      cancel-in-progress: false
+    outputs:
+      changed: ${{ steps.films.outputs.changed == 'true' || steps.music.outputs.changed == 'true' }}
+      remaining: ${{ steps.music.outputs.remaining }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Przywróć dane z katalogu (filmy)
+        uses: actions/cache/restore@v4
+        with:
+          path: films-raw.json
+          key: films-raw-${{ github.run_id }}
+          restore-keys: films-raw-
+      - name: Przywróć dane z katalogu (muzyka)
+        uses: actions/cache/restore@v4
+        with:
+          path: music-raw.json
+          key: music-raw-${{ github.run_id }}
+          restore-keys: music-raw-
+      - name: Przywróć cache TMDB
+        uses: actions/cache/restore@v4
+        with:
+          path: tmdb-cache.json
+          key: tmdb-${{ github.run_id }}
+          restore-keys: tmdb-
+      - name: Przywróć cache MusicBrainz
+        uses: actions/cache/restore@v4
+        with:
+          path: mb-cache.json
+          key: mb-${{ github.run_id }}
+          restore-keys: mb-
+
+      - name: Brakujące dane weź z opublikowanej strony
+        run: |
+          SITE_URL="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}"
+          for k in films music; do
+            [ -s "$k-raw.json" ] || curl -fsSL "$SITE_URL/$k.json" -o "$k-raw.json" || rm -f "$k-raw.json"
+          done
+
+      - name: Filmy – TMDB (nowe dopasowania i daty premiery)
+        id: films
+        continue-on-error: true
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          [ -s films-raw.json ] || { echo "Brak danych filmów."; exit 0; }
+          node harvester/enrich-tmdb.mjs films-raw.json tmdb-cache.json > site/films.json
+
+      - name: Muzyka – MusicBrainz (okładki i daty pierwszego wydania)
+        id: music
+        continue-on-error: true
+        env:
+          MB_MINUTES: '40'
+        run: |
+          [ -s music-raw.json ] || { echo "Brak danych muzyki."; exit 0; }
+          node harvester/enrich-music.mjs music-raw.json mb-cache.json > site/music.json
+
+      - name: Zapisz cache TMDB
+        if: ${{ always() && hashFiles('tmdb-cache.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: tmdb-cache.json
+          key: tmdb-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Zapisz cache MusicBrainz
+        if: ${{ always() && hashFiles('mb-cache.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: mb-cache.json
+          key: mb-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Kompletność plików strony
+        run: |
+          # gdyby któryś krok padł, nie publikujemy pustego pliku
+          for k in films music; do
+            if [ ! -s "site/$k.json" ] && [ -s "$k-raw.json" ]; then cp "$k-raw.json" "site/$k.json"; fi
+          done
+      - uses: actions/upload-pages-artifact@v3
+        if: ${{ steps.films.outputs.changed == 'true' || steps.music.outputs.changed == 'true' }}
+        with:
+          path: site
+          name: strona-pelna
+
+  opublikuj:
+    needs: wzbogac
+    if: ${{ !cancelled() && needs.wzbogac.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: strona-pelna
+
+  dalej:
+    needs: wzbogac
+    # tylko gdy ten przebieg coś dodał (inaczej np. awaria MusicBrainz kręciłaby łańcuch w kółko)
+    if: ${{ !cancelled() && needs.wzbogac.outputs.changed == 'true' && needs.wzbogac.outputs.remaining != '' && needs.wzbogac.outputs.remaining != '0' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Zamów kolejną porcję okładek
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LEFT: ${{ needs.wzbogac.outputs.remaining }}
+        run: |
+          echo "Zostało do sprawdzenia w MusicBrainz: $LEFT"
+          gh workflow run publikuj.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
