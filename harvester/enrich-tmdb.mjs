@@ -1,4 +1,3 @@
-
 // Wzbogaca films.json o plakaty, oceny, opisy i poprawne tytuły z TMDB.
 // Klucz: zmienna środowiskowa TMDB_API_KEY (sekret w GitHub) albo plik .env obok skryptu.
 // Uruchom: node enrich-tmdb.mjs films.json [tmdb-cache.json] > films-enriched.json   (Node 18+)

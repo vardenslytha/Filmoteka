@@ -274,7 +274,7 @@ async function load(mode){
     const who = (r.d||[]).map(flip);
     const G = SIMPLE[mode].filter(([,re]) => (r.g||[]).some(g => re.test(g))).map(([n]) => n);
     const rate = r.tmdb?.rating && r.tmdb.votes >= 20 ? r.tmdb.rating : null;
-    return {...r, c:r.c||[], g:r.g||[], d:who, G, rate, yn:Number(r.y)||0, key: norm(r.t + ' ' + (r.o||'') + ' ' + who.join(' '))};
+    return {...r, c:r.c||[], g:r.g||[], d:who, G, rate, fs:r.fs||[r.f], alt:r.alt||[], yn:Number(r.y)||0, key: norm(r.t + ' ' + (r.o||'') + ' ' + who.join(' '))};
   });
   const ys = d.recs.map(r => r.yn).filter(y => y > 1880);
   d.minY = ys.length ? Math.min(...ys) : 1900; d.maxY = ys.length ? Math.max(...ys) : new Date().getFullYear();
@@ -324,7 +324,7 @@ async function switchMode(mode){
   $('branch').innerHTML = '<option value="">Wszystkie filie</option>' + codes.map(c => { const l=libName(c); return `<option value="${c}">${esc(l.name)}${l.addr?' – '+esc(l.addr):''}</option>`; }).join('');
   $('branch').value = codes.includes(state.branch) ? state.branch : '';
   state.branch = $('branch').value;
-  const fc = {}; DATA.recs.forEach(r => fc[r.f]=(fc[r.f]||0)+1);
+  const fc = {}; DATA.recs.forEach(r => r.fs.forEach(f => fc[f]=(fc[f]||0)+1));
   const fmts = Object.entries(fc).sort((a,b)=>b[1]-a[1]);
   $('fmtSeg').hidden = fmts.length < 2;
   $('fmtSeg').innerHTML = `<button data-f="" aria-pressed="true">Wszystkie</button>` + fmts.map(([f]) => `<button data-f="${f}" aria-pressed="false">${M.fmtName[f]||f}</button>`).join('');
@@ -333,7 +333,8 @@ async function switchMode(mode){
   const gc = {}; DATA.recs.forEach(r => r.G.forEach(g => gc[g]=(gc[g]||0)+1));
   const order = SIMPLE[mode].map(([n]) => n).filter(n => gc[n] >= 3);
   $('chips').innerHTML = ['',...order].map(g => `<button class="chip" data-g="${esc(g)}" aria-pressed="${g===''}">${g?esc(g):'Wszystkie'}</button>`).join('');
-  $('harvested').textContent = 'Stan katalogu: ' + new Date(DATA.harvestedAt).toLocaleString('pl-PL',{dateStyle:'medium',timeStyle:'short'});
+  $('harvested').textContent = 'Stan katalogu: ' + new Date(DATA.harvestedAt).toLocaleString('pl-PL',{dateStyle:'medium',timeStyle:'short'})
+    + (DATA.partial ? ` · odświeżanie w toku (${DATA.refreshed.toLocaleString('pl-PL')} pozycji z nowego przebiegu)` : '');
   syncView(); syncFilterLabels(); render();
 }
 
@@ -344,7 +345,7 @@ function filtered(){
   const list = DATA.recs.filter(r => {
     if (state.view==='fav' && !fav.has(r.id)) return false;
     if (state.genre && !r.G.includes(state.genre)) return false;
-    if (state.fmt && r.f !== state.fmt) return false;
+    if (state.fmt && !r.fs.includes(state.fmt)) return false;
     if (state.watch && !state.watch.has(r.id)) return false;
     if (r.yn && (r.yn < state.yFrom || r.yn > state.yTo)) return false;
     if (state.rMin > 0 && !(r.rate >= state.rMin)) return false;
@@ -372,7 +373,7 @@ function card(r){
     <button class="fav" data-fav="${r.id}" aria-pressed="${isFav}" aria-label="${isFav?'Usuń z ulubionych':'Dodaj do ulubionych'}: ${esc(r.t)}">${HEART}</button>
     <button class="open" aria-label="${esc(r.t)}${r.d[0]?', '+esc(r.d[0]):''}">
       <div class="case${poster?' has-poster':''}"><div class="art" style="background:${coverStyle(r)}"></div>${poster?`<img class="poster" src="${poster}" alt="" loading="lazy" onerror="this.parentNode.classList.remove('has-poster');this.remove()">`:''}
-        ${r.rate?`<span class="badge rate">★ ${r.rate.toFixed(1)}</span>`:''}${state.watch?'<span class="badge wl">Z listy</span>':''}<span class="badge fmt">${esc(M.fmtName[r.f]||r.f)}</span>
+        ${r.rate?`<span class="badge rate">★ ${r.rate.toFixed(1)}</span>`:''}${state.watch?'<span class="badge wl">Z listy</span>':''}<span class="badge fmt">${esc(fmtLabel(r))}</span>
         <div class="txt"><span></span><span class="ttl">${esc(r.t)}</span><span class="yr">${esc(r.y||'')}${state.mode==='films'&&r.c[0]?' · '+esc(r.c[0]):''}</span></div></div>
       <div class="under">${poster?`<span class="t2">${esc(r.t)}</span>`:''}<span class="dir">${esc(r.d[0]||r.g[0]||'')}${poster&&r.y?' · '+esc(r.y):''}</span>${pill}</div>
     </button></article>`;
@@ -395,6 +396,7 @@ function syncFilterLabels(){
   $('yFromV').textContent = state.yFrom; $('yToV').textContent = state.yTo;
   $('rMinV').textContent = state.rMin > 0 ? state.rMin.toFixed(1) : 'dowolna';
 }
+function fmtLabel(r){ const M = MODES[state.mode]; return r.fs.map(f => M.fmtName[f]||f).join(' · '); }
 function toggleFav(id){ const s = favs[state.mode]; s.has(id) ? s.delete(id) : s.add(id); saveFavs(); }
 
 // ---------- szczegóły ----------
@@ -411,7 +413,7 @@ function openSheet(id){
     <div class="head">
       <div class="thumb">${r.tmdb?.poster?`<img src="${r.tmdb.poster}" alt="">`:`<div style="position:absolute;inset:0;background:${coverStyle(r)}"></div>`}</div>
       <div><h2 id="sTitle">${esc(r.t)}</h2>${r.o?`<p class="orig">${esc(r.o)}</p>`:''}
-        <p class="stat">${esc(r.y||'')} · ${esc(M.fmtName[r.f]||r.f)}${r.rate?` · ★ ${r.rate.toFixed(1)}`:''}<br>
+        <p class="stat">${esc(r.y||'')} · ${esc(fmtLabel(r))}${r.rate?` · ★ ${r.rate.toFixed(1)}`:''}<br>
         ${r.h.length ? (nOk ? `<b>Na półce w ${nOk} z ${r.h.length} ${plural(r.h.length,'miejsca','miejsc','miejsc')}</b>` : `<b class="no">Wszystkie egzemplarze wypożyczone</b>`) : ''}</p></div>
     </div>
     <div class="actions">
@@ -428,7 +430,8 @@ function openSheet(id){
       ${r.a?`<dt>Dla kogo</dt><dd>${esc(r.a)}</dd>`:''}
       <dt>Wypożyczenie</dt><dd>14 dni</dd>
     </dl>
-    <p class="sec">Gdzie stoi (${r.h.length} egz.)</p>
+    ${r.alt.length?`<p class="sec">Wydania w katalogu (${r.alt.length+1})</p><div class="actions"><a class="btn" href="${CAT}${r.id}" target="_blank" rel="noopener">${esc(M.fmtName[r.f]||r.f)}${r.y?' · '+esc(r.y):''}</a>${r.alt.map(([id,y,f])=>`<a class="btn" href="${CAT}${id}" target="_blank" rel="noopener">${esc(M.fmtName[f]||f)}${y?' · '+esc(y):''}</a>`).join('')}</div><p class="note">Egzemplarze wszystkich wydań są zebrane na liście poniżej. Rezerwujesz konkretne wydanie.</p>`:''}
+    <p class="sec">Gdzie stoi (${r.h.length} ${plural(r.h.length,'miejsce','miejsca','miejsc')})</p>
     ${r.h.length?`<ul class="branches">${sorted.map(([c,ok]) => { const l=libName(c); return `<li class="${c===state.branch?'mine':''}"><div><div class="nm">${esc(l.name)}</div><div class="ad">${esc(l.addr)}</div></div><span class="pill ${ok?'ok':'no'}">${ok?M.status[0]:M.status[1]}</span></li>`; }).join('')}</ul>`:'<p class="note">Katalog nie podaje egzemplarzy do wypożyczenia. Szczegóły sprawdzisz w katalogu.</p>'}
     <p class="note">Dostępność według stanu katalogu z chwili pobrania danych. Rezerwacja wymaga zalogowania w katalogu biblioteki.</p>`;
   $('sheet').hidden = false; $('scrim').hidden = false; $('sClose').focus();

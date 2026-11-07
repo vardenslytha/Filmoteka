@@ -4,6 +4,8 @@
 //   RTYPE=audios node harvest.mjs > music.json     (muzyka; audiobooki są pomijane)
 // Opcjonalnie rok końcowy jako argument: node harvest.mjs 2026
 
+import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync } from 'node:fs';
+
 const HOST = 'https://omnis-br.primo.exlibrisgroup.com';
 const INST = '48OMNIS_BRP';
 const VID = '48OMNIS_BRP:BRACZ';
@@ -19,13 +21,36 @@ const PAGE = 100;          // 100 wyników trwa tyle co 50, więc o połowę mni
 const GUEST_MAX = 500;
 // Przedział z większą liczbą wyników dzielimy na wyszukiwania po pierwszej literze tytułu.
 // Polskie litery są osobno („s” ≠ „ś”), cyfry też.
+// Dalsze strony (przesunięcie 100+) dużych wyników katalog często liczy dłużej niż 30 s i zwraca pustą listę,
+// więc dzielimy literami już każdy przedział większy niż jedna strona. Litery to zwykle po kilkadziesiąt pozycji.
+const SPLIT_ABOVE = Number(process.env.SPLIT_ABOVE || 100);
 const LETTERS = [...'abcdefghijklmnopqrstuvwxyz0123456789', 'ć', 'ł', 'ó', 'ś', 'ź', 'ż'];
 // Przeciążony katalog ucina zapytanie po ~30 s i zwraca pustą listę. Po jednym zapytaniu naraz
 // (jak w jedynym w pełni udanym przebiegu) katalog odpowiada w ~8 s. Można podnieść zmienną CONCURRENCY.
 const START_CONCURRENCY = Number(process.env.CONCURRENCY || 1);
 const DELAY_MS = Number(process.env.DELAY_MS || 500);   // przerwa po każdej stronie
-const THROTTLE_PAUSE_MS = Number(process.env.THROTTLE_PAUSE_MS || 60_000); // przerwa po blokadzie (rośnie przy kolejnych)
+const THROTTLE_PAUSE_MS = Number(process.env.THROTTLE_PAUSE_MS || 30_000); // przerwa, gdy katalog nie zdążył odpowiedzieć
 const MAX_REQUEUE = 5;        // tyle razy ponawiamy jedną stronę, zanim ją pominiemy
+
+// ---------- wznawianie ----------
+// CHECKPOINT: plik z postępem; kolejne uruchomienie zaczyna tam, gdzie skończyło poprzednie.
+// MAX_MINUTES: po tylu minutach harvester sam kończy pracę i zapisuje postęp (przed limitem GitHuba).
+// FRESH_HOURS: po ukończonym cyklu przez tyle godzin nie pobieramy od nowa.
+// OUT: plik wynikowy (bez OUT wynik idzie na standardowe wyjście, jak dawniej).
+const CHECKPOINT = process.env.CHECKPOINT || '';
+const MAX_MINUTES = Number(process.env.MAX_MINUTES || 0);
+const FRESH_HOURS = Number(process.env.FRESH_HOURS || 20);
+const STALE_RESUME_HOURS = 72;     // niedokończony cykl starszy niż 3 dni zaczynamy od nowa
+const SAVE_EVERY = 20;             // zapis postępu co tyle stron
+const MAX_PAGES = Number(process.env.MAX_PAGES || 0); // tylko do testów: przerwij po tylu stronach
+const OUT = process.env.OUT || '';
+// BASE: opcjonalny plik z poprzednio opublikowanymi danymi; podstawa dla pierwszego cyklu, zanim powstanie pełny zbiór.
+const BASE = process.env.BASE || '';
+const CKPT_VERSION = 1;
+
+function setState(state) {
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `state=${state}\n`);
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (s) => process.stderr.write(s);
@@ -225,7 +250,7 @@ function groupEditions(recs) {
   }
   const out = [];
   for (const g of groups.values()) {
-    if (g.length === 1) { const r = g[0]; out.push({ ...r, fs: [r.f] }); continue; }
+    if (g.length === 1) { const r = g[0]; out.push({ ...r, fs: r.fs || [r.f] }); continue; }
     // główny rekord: najwięcej egzemplarzy, potem najnowsze wydanie
     g.sort((a, b) => b.h.length - a.h.length || Number(b.y || 0) - Number(a.y || 0));
     const main = g[0];
@@ -238,9 +263,9 @@ function groupEditions(recs) {
       y: years.length ? String(Math.min(...years)) : main.y,
       g: main.g.length ? main.g : (g.find((r) => r.g.length)?.g || []),
       c: main.c?.length ? main.c : g.find((r) => r.c?.length)?.c,
-      fs: [...new Set(g.map((r) => r.f))],
+      fs: [...new Set(g.flatMap((r) => r.fs || [r.f]))],
       h: [...byLib.entries()],
-      alt: g.slice(1).map((r) => [r.id, r.y, r.f]),
+      alt: [...g.slice(1).map((r) => [r.id, r.y, r.f]), ...g.flatMap((r) => r.alt || [])].filter((a, i, arr) => a[0] !== main.id && arr.findIndex((b) => b[0] === a[0]) === i),
     });
   }
   return out;
@@ -252,24 +277,64 @@ async function main() {
   const lastYear = Number(process.argv[2] || new Date().getFullYear());
   const started = Date.now();
   const mins = () => ((Date.now() - started) / 60000).toFixed(1);
-  // Token gościa jest ważny 24 h; nowy pobieramy tylko po odmowie.
-  let jwt = await guestJwt();
   const toRecord = MUSIC ? musicRecord : filmRecord;
   const records = new Map();
-  const libs = {};
+  let libs = {};
   const sliceTotal = new Map();      // liczba wyników przedziału z jego pierwszej strony
-  let errors = 0, pagesDone = 0, pagesKnown = 0, throttles = 0;
+  let errors = 0, pagesDone = 0, pagesKnown = 0, throttles = 0, pagesThisRun = 0;
   let concurrency = START_CONCURRENCY, pauseUntil = 0;
+  let queue = [];
+  const inFlight = new Set();       // strony w drodze; przy zapisie wracają do kolejki
+  let cycleStartedAt = new Date().toISOString();
+  // poprzedni pełny zbiór (surowe rekordy); po każdej porcji publikujemy nowe rekordy + resztę z niego
+  let prev = [];
 
-  const queue = [];
-  for (const [from, to] of yearRanges(lastYear)) for (const term of TERMS) queue.push({ term, from, to, offset: 0, tries: 0 });
-  pagesKnown = queue.length;
+  // --- punkt kontrolny ---
+  const ck = CHECKPOINT && existsSync(CHECKPOINT) ? (() => { try { return JSON.parse(readFileSync(CHECKPOINT, 'utf8')); } catch { return null; } })() : null;
+  const ckValid = ck && ck.v === CKPT_VERSION && ck.rtype === RTYPE;
+  if (ckValid && Array.isArray(ck.prev)) prev = ck.prev;
+  if (!prev.length && BASE && existsSync(BASE)) {
+    try { prev = JSON.parse(readFileSync(BASE, 'utf8')).recs || []; log(`Podstawa z opublikowanej strony: ${prev.length} pozycji.\n`); } catch {}
+  }
+  if (ckValid && ck.done && Date.now() - Date.parse(ck.completedAt) < FRESH_HOURS * 3600e3) {
+    log(`Dane z ${ck.completedAt} są świeże (< ${FRESH_HOURS} h). Nic do pobrania.\n`);
+    setState('fresh');
+    return;
+  }
+  if (ckValid && !ck.done && Date.now() - Date.parse(ck.cycleStartedAt) < STALE_RESUME_HOURS * 3600e3) {
+    for (const r of ck.records) records.set(r.id, r);
+    libs = ck.libs || {};
+    for (const [k, v] of ck.sliceTotal || []) sliceTotal.set(k, v);
+    queue = ck.queue || [];
+    pagesDone = ck.pagesDone || 0; pagesKnown = ck.pagesKnown || 0;
+    cycleStartedAt = ck.cycleStartedAt;
+    log(`Wznawiam cykl z ${cycleStartedAt}: ${records.size} rekordów, ${queue.length} stron w kolejce (zrobione ${pagesDone}/${pagesKnown}).\n`);
+  } else {
+    for (const [from, to] of yearRanges(lastYear)) for (const term of TERMS) queue.push({ term, from, to, offset: 0, tries: 0 });
+    pagesKnown = queue.length;
+    log(`Nowy cykl: ${queue.length} przedziałów lat.\n`);
+  }
+
+  function saveCheckpoint(done = false) {
+    if (!CHECKPOINT) return;
+    const data = { v: CKPT_VERSION, rtype: RTYPE, done, cycleStartedAt, savedAt: new Date().toISOString(),
+      completedAt: done ? new Date().toISOString() : undefined,
+      pagesDone, pagesKnown, libs, sliceTotal: [...sliceTotal.entries()],
+      queue: done ? [] : [...inFlight, ...queue].map((t) => ({ ...t, tries: 0 })), records: done ? [] : [...records.values()],
+      prev: done ? [...records.values()] : prev };
+    writeFileSync(CHECKPOINT + '.tmp', JSON.stringify(data));
+    renameSync(CHECKPOINT + '.tmp', CHECKPOINT);
+  }
+
+  // Token gościa jest ważny 24 h; nowy pobieramy tylko po odmowie.
+  let jwt = await guestJwt();
 
   const label = (t) => `${t.from === t.to ? t.from : t.from + '-' + t.to}${t.prefix ? ' „' + t.prefix + '…”' : ''}`;
 
   async function throttled(task, why) {
     throttles++;
-    const pause = Math.min(THROTTLE_PAUSE_MS * 2 ** Math.min(throttles - 1, 3), 8 * 60_000);
+    // stała przerwa; dłuższa dopiero przy kolejnych odmowach tej samej strony
+    const pause = THROTTLE_PAUSE_MS * Math.min(task.tries + 1, 4);
     pauseUntil = Math.max(pauseUntil, Date.now() + pause);
     if (concurrency > 1) concurrency = 1;
     task.tries++;
@@ -310,13 +375,13 @@ async function main() {
     const expected = Math.min(PAGE, (known ?? total) - task.offset);
     if (n < expected && task.tries < MAX_REQUEUE) return throttled(task, `niepełna strona ${n}/${expected}`);
 
-    pagesDone++;
+    pagesDone++; pagesThisRun++;
     if (task.offset === 0) {
       sliceTotal.set(sk, total);
-      if (!task.prefix && total > GUEST_MAX) {
+      if (!task.prefix && total > SPLIT_ABOVE) {
         // za dużo dla gościa: ten przedział pobieramy literami (pierwsza strona i tak się przyda)
         for (const L of LETTERS) { queue.push({ ...task, prefix: L, offset: 0, tries: 0, rechecked: true }); pagesKnown++; }
-        log(`${label(task)}: ${total} wyników > ${GUEST_MAX}, dzielę na ${LETTERS.length} wyszukiwań po pierwszej literze tytułu\n`);
+        log(`${label(task)}: ${total} wyników, dzielę na ${LETTERS.length} wyszukiwań po pierwszej literze tytułu\n`);
       } else {
         if (total > GUEST_MAX) log(`Uwaga: ${label(task)} ma ${total} wyników, pobiorę tylko pierwsze ${GUEST_MAX}\n`);
         for (let off = PAGE; off < Math.min(total, GUEST_MAX); off += PAGE) { queue.push({ ...task, offset: off, tries: 0 }); pagesKnown++; }
@@ -329,25 +394,62 @@ async function main() {
     log(`[${mins()} min] strony ${pagesDone}/${pagesKnown} · ${label(task)} @${task.offset}/${total} → ${records.size} rekordów\n`);
   }
 
-  await new Promise((resolve, reject) => {
-    let active = 0, failed = false;
-    const next = () => {
-      if (failed) return;
-      if (!queue.length && active === 0) return resolve();
-      while (active < concurrency && queue.length) {
-        const task = queue.shift();
-        active++;
-        runTask(task)
-          .then(() => sleep(DELAY_MS))
-          .then(() => { active--; next(); }, (e) => { failed = true; reject(e); });
-      }
-    };
-    next();
-  });
+  const outOfTime = () => (MAX_MINUTES && Date.now() - started > MAX_MINUTES * 60000) || (MAX_PAGES && pagesThisRun >= MAX_PAGES);
+  let stoppedEarly = false, lastSaved = 0;
+  try {
+    await new Promise((resolve, reject) => {
+      let active = 0, failed = false;
+      const next = () => {
+        if (failed) return;
+        if (outOfTime() && queue.length) { stoppedEarly = true; if (active === 0) resolve(); return; }
+        if (!queue.length && active === 0) return resolve();
+        while (active < concurrency && queue.length && !outOfTime()) {
+          const task = queue.shift();
+          active++; inFlight.add(task);
+          runTask(task)
+            .finally(() => inFlight.delete(task))
+            .then(() => { if (pagesThisRun - lastSaved >= SAVE_EVERY) { saveCheckpoint(); lastSaved = pagesThisRun; } })
+            .then(() => sleep(DELAY_MS))
+            .then(() => { active--; next(); }, (e) => { failed = true; reject(e); });
+        }
+        if (outOfTime() && queue.length && active === 0) { stoppedEarly = true; resolve(); }
+      };
+      next();
+    });
+  } catch (e) {
+    saveCheckpoint();                // nawet po błędzie następny przebieg wznowi pracę
+    setState('partial-nopub');       // wyniku nie zapisaliśmy, więc nic nie publikujemy
+    throw e;
+  }
+
+  if (stoppedEarly) {
+    saveCheckpoint();
+    log(`Przerwa po ${mins()} min: ${records.size} rekordów, zostało ${queue.length} stron. Następny przebieg wznowi pracę.\n`);
+    if (prev.length) {
+      // nowe rekordy zastępują stare o tym samym id; reszta zostaje z poprzedniego pełnego zbioru
+      // pozycję z poprzedniego zbioru pomijamy, jeśli odświeżyliśmy ją albo którekolwiek z jej wydań
+      const fresh = new Set(records.keys());
+      const mix = new Map(prev.filter((r) => !fresh.has(r.id) && !(r.alt || []).some((a) => fresh.has(a[0]))).map((r) => [r.id, r]));
+      for (const r of records.values()) mix.set(r.id, r);
+      const merged = groupEditions([...mix.values()]);
+      const result = JSON.stringify({ kind: MUSIC ? 'music' : 'films', harvestedAt: new Date().toISOString(), cycleStartedAt,
+        partial: true, refreshed: records.size, libs: { ...(ck?.libs || {}), ...libs }, recs: merged });
+      if (OUT) writeFileSync(OUT, result); else process.stdout.write(result);
+      log(`Publikuję porcję: ${records.size} odświeżonych + reszta z poprzedniego zbioru = ${merged.length} pozycji.\n`);
+      setState('partial');
+    } else {
+      log('Brak poprzedniego pełnego zbioru, więc tej porcji jeszcze nie publikuję.\n');
+      setState('partial-nopub');
+    }
+    return;
+  }
 
   const merged = groupEditions([...records.values()]);
-  log(`Gotowe w ${mins()} min: ${records.size} rekordów → ${merged.length} po połączeniu wydań, ${pagesDone} stron, blokad: ${throttles}, pominiętych stron: ${errors}\n`);
-  process.stdout.write(JSON.stringify({ kind: MUSIC ? 'music' : 'films', harvestedAt: new Date().toISOString(), libs, recs: merged }));
+  const result = JSON.stringify({ kind: MUSIC ? 'music' : 'films', harvestedAt: new Date().toISOString(), cycleStartedAt, libs, recs: merged });
+  if (OUT) writeFileSync(OUT, result); else process.stdout.write(result);
+  saveCheckpoint(true);
+  log(`Gotowe (cykl od ${cycleStartedAt}): ${records.size} rekordów → ${merged.length} po połączeniu wydań, ${pagesDone} stron, w tym przebiegu ${pagesThisRun}, blokad: ${throttles}, pominiętych stron: ${errors}\n`);
+  setState('complete');
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
