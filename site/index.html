@@ -53,6 +53,7 @@ select{flex:0 1 auto;max-width:100%}
 .btn{border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:8px;padding:8px 14px;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
 .btn .dot{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+.linkish{border:0;background:none;padding:0;color:var(--accent);text-decoration:underline;text-underline-offset:3px;font:inherit}
 
 .meta{padding-block:14px 4px;display:flex;flex-wrap:wrap;gap:8px 18px;color:var(--muted);font-size:13px}
 .meta b{color:var(--fg);font-variant-numeric:tabular-nums}
@@ -78,7 +79,10 @@ select{flex:0 1 auto;max-width:100%}
   display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 1px 2px rgba(0,0,0,.3)}
 .badge{position:absolute;z-index:2;font-family:var(--mono);font-size:11px;font-weight:500;padding:2px 6px;border-radius:4px;background:rgba(8,10,14,.72);color:#f2f2f2}
 .badge.fmt{bottom:8px;right:8px}
-.badge.rate{top:8px;left:16px;color:#ffd78a}
+.tl{position:absolute;z-index:2;top:8px;left:16px;display:flex;flex-direction:column;align-items:flex-start;gap:4px}
+.tl .badge{position:static}
+.badge.rate{color:#ffd78a}
+.badge.new{background:#ffc861;color:#1a1405;font-weight:600}
 .badge.wl{bottom:8px;left:16px;background:#f2f2f2;color:#111}
 .fav{position:absolute;z-index:3;top:6px;right:6px;width:30px;height:30px;border-radius:50%;border:0;background:rgba(8,10,14,.62);color:#f2f2f2;display:grid;place-items:center;padding:0}
 .fav svg{width:16px;height:16px}
@@ -96,7 +100,7 @@ select{flex:0 1 auto;max-width:100%}
 body[data-mode="music"] .case{aspect-ratio:1/1;border-radius:3px}
 body[data-mode="music"] .case::before{width:0}
 body[data-mode="music"] .case .txt{padding:14px}
-body[data-mode="music"] .badge.rate,body[data-mode="music"] .badge.wl{left:8px}
+body[data-mode="music"] .tl,body[data-mode="music"] .badge.wl{left:8px}
 body[data-mode="music"] .grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
 @media (max-width:480px){body[data-mode="music"] .grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 
@@ -123,7 +127,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 @media (max-width:640px){.sheet{top:auto;left:0;width:100%;max-height:88%;border-left:0;border-top:1px solid var(--line);border-radius:16px 16px 0 0;padding-left:max(18px,env(safe-area-inset-left,0px))}}
 .sheet .head{display:flex;gap:16px;align-items:flex-start;padding-right:34px}
 .sheet .thumb{flex:0 0 96px;aspect-ratio:2/3;border-radius:4px;overflow:hidden;position:relative;background:var(--raised)}
-body[data-mode="music"] .sheet .thumb{aspect-ratio:1/1}
+body[data-mode="music"] .sheet .thumb{aspect-ratio:1/1;flex-basis:120px}
 .sheet .thumb img{width:100%;height:100%;object-fit:cover;display:block}
 .sheet h2{font-family:var(--display);font-size:24px;line-height:1.1;margin:0;text-wrap:balance}
 .sheet .orig{color:var(--muted);margin:4px 0 0;font-style:italic}
@@ -197,6 +201,7 @@ ul.branches li.mine{background:color-mix(in oklab,var(--accent) 12%,transparent)
       <div class="field">
         <span class="lab">Dostępność</span>
         <label class="check"><input type="checkbox" id="onlyAvail"> Tylko na półce teraz</label>
+        <label class="check" id="onlyNewWrap" hidden><input type="checkbox" id="onlyNew"> Tylko nowości (ostatnie 30 dni)</label>
         <button class="btn" id="clearFilters" style="align-self:flex-start;margin-top:6px">Wyczyść filtry</button>
       </div>
     </div>
@@ -226,7 +231,7 @@ ul.branches li.mine{background:color-mix(in oklab,var(--accent) 12%,transparent)
 
 <footer class="wrap foot">
   <p>Dane: katalog Biblioteki Raczyńskich, odświeżane co noc. Dostępność może się zmienić w ciągu dnia, przed wyjściem sprawdź ją w katalogu. Ulubione zapisują się tylko w tej przeglądarce.</p>
-  <p>Plakaty, oceny i opisy filmów pochodzą z TMDB. Ta strona korzysta z API TMDB, ale nie jest przez TMDB wspierana ani certyfikowana. Nie jest też oficjalną stroną biblioteki.</p>
+  <p>Plakaty, oceny i opisy filmów pochodzą z TMDB. Ta strona korzysta z API TMDB, ale nie jest przez TMDB wspierana ani certyfikowana. Okładki płyt: Cover Art Archive i MusicBrainz. Nie jest to oficjalna strona biblioteki.</p>
 </footer>
 
 <div class="scrim" id="scrim" hidden></div>
@@ -234,6 +239,7 @@ ul.branches li.mine{background:color-mix(in oklab,var(--accent) 12%,transparent)
 
 <script type="module">
 const CAT = 'https://omnis-br.primo.exlibrisgroup.com/discovery/fulldisplay?vid=48OMNIS_BRP:BRACZ&docid=alma';
+const NEW_DAYS = 30;
 const $ = id => document.getElementById(id);
 const store = { get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}} };
 function norm(s){return (s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/ł/g,'l').replace(/&/g,' and ').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();}
@@ -241,6 +247,7 @@ function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','
 function hash(s){let h=2166136261;for(const c of s){h^=c.charCodeAt(0);h=Math.imul(h,16777619)}return h>>>0}
 const flip = n => { const m = (n||'').match(/^([^,]+),\s*([^,]+)$/); return m ? `${m[2]} ${m[1]}` : n; };
 const plural = (n, one, few, many) => n===1 ? one : (n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20)) ? few : many;
+const fmtDate = s => new Date(s + 'T12:00:00').toLocaleDateString('pl-PL', {day:'numeric', month:'long', year:'numeric'});
 const HEART = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-9.3-9.2C1.4 7.9 3.6 4.5 7 4.5c2 0 3.4 1.1 5 3 1.6-1.9 3-3 5-3 3.4 0 5.6 3.4 4.3 6.8-1.8 4.6-9.3 9.2-9.3 9.2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 
 // Proste gatunki zamiast katalogowych ("Dramat filmowy" → Dramat)
@@ -258,11 +265,11 @@ const MODES = {
   films: { file:'films.json', noun:['film','filmy','filmów'], who:'Reżyseria', search:'Tytuł, reżyser, gatunek…', status:['Na półce','Wypożyczony'],
     fmtName:{DVD:'DVD',BD:'Blu-ray'}, link:'Zwiastun', linkQ:r=>`${r.o||r.t} ${r.y||''} zwiastun`,
     wlHead:'Sprawdź swoją listę filmów', wlPh:'Albo wklej tytuły, po jednym w wierszu:\nDiuna\nOppenheimer\nChłopi',
-    sorts:[['year','Najnowsze'],['top','Najwyżej oceniane'],['avail','Najwięcej dostępnych'],['title','Tytuł A–Z'],['old','Najstarsze']] },
+    sorts:[['year','Najnowsze filmy'],['new','Nowe w bibliotece'],['top','Najwyżej oceniane'],['avail','Najwięcej dostępnych'],['title','Tytuł A–Z'],['old','Najstarsze']] },
   music: { file:'music.json', noun:['płyta','płyty','płyt'], who:'Wykonawca', search:'Album, wykonawca, gatunek…', status:['Na półce','Wypożyczona'],
     fmtName:{CD:'CD',LP:'Winyl',MC:'Kaseta',SACD:'SACD'}, link:'Posłuchaj', linkQ:r=>`${r.d[0]||''} ${r.t}`,
     wlHead:'Sprawdź swoją listę albumów', wlPh:'Wklej albumy lub wykonawców, po jednym w wierszu:\nKayah\nBrothers in arms\nMiles Davis',
-    sorts:[['year','Najnowsze'],['avail','Najwięcej dostępnych'],['title','Tytuł A–Z'],['artist','Wykonawca A–Z'],['old','Najstarsze']] },
+    sorts:[['year','Najnowsze płyty'],['new','Nowe w bibliotece'],['avail','Najwięcej dostępnych'],['title','Tytuł A–Z'],['artist','Wykonawca A–Z'],['old','Najstarsze']] },
 };
 const cache = {};
 async function load(mode){
@@ -270,14 +277,19 @@ async function load(mode){
   const res = await fetch(MODES[mode].file, {cache:'no-cache'});
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const d = await res.json();
+  const newSince = new Date(Date.now() - NEW_DAYS*864e5).toISOString().slice(0,10);
   d.recs = d.recs.map(r => {
     const who = (r.d||[]).map(flip);
     const G = SIMPLE[mode].filter(([,re]) => (r.g||[]).some(g => re.test(g))).map(([n]) => n);
     const rate = r.tmdb?.rating && r.tmdb.votes >= 20 ? r.tmdb.rating : null;
-    return {...r, c:r.c||[], g:r.g||[], d:who, G, rate, fs:r.fs||[r.f], alt:r.alt||[], yn:Number(r.y)||0, key: norm(r.t + ' ' + (r.o||'') + ' ' + who.join(' '))};
+    return {...r, c:r.c||[], g:r.g||[], d:who, G, rate, fs:r.fs||[r.f], alt:r.alt||[], yn:Number(r.y)||0,
+      img: r.tmdb?.poster || r.cv || '', isNew: !!r.n && r.n >= newSince,
+      key: norm(r.t + ' ' + (r.o||'') + ' ' + who.join(' '))};
   });
   const ys = d.recs.map(r => r.yn).filter(y => y > 1880);
   d.minY = ys.length ? Math.min(...ys) : 1900; d.maxY = ys.length ? Math.max(...ys) : new Date().getFullYear();
+  d.hasDates = d.recs.some(r => r.n);
+  d.newCount = d.recs.filter(r => r.isNew).length;
   return cache[mode] = d;
 }
 
@@ -296,7 +308,7 @@ function coverStyle(r){
 
 // ---------- stan ----------
 const initialMode = (location.hash==='#muzyka') ? 'music' : 'films';
-const state = { mode:initialMode, view:'all', q:'', branch: store.get('branch')||'', fmt:'', sort:'year', onlyAvail:false, genre:'',
+const state = { mode:initialMode, view:'all', q:'', branch: store.get('branch')||'', fmt:'', sort:'year', onlyAvail:false, onlyNew:false, genre:'',
   yFrom:0, yTo:9999, rMin:0, watch:null, shown:60 };
 let DATA = null, LIBS = {};
 const favs = { films:new Set(), music:new Set() };
@@ -305,20 +317,23 @@ const saveFavs = () => store.set('fav-'+state.mode, JSON.stringify([...favs[stat
 const libName = c => { const [m,s] = (LIBS[c]||'|').split('|'); return {name: c==='WYPOZ' ? 'Wypożyczalnia Główna' : /^F\d+$/.test(c) ? 'Filia ' + c.replace(/^F0?/,'') : (m||c), addr: s || m || ''}; };
 
 async function switchMode(mode){
-  Object.assign(state, {mode, genre:'', fmt:'', watch:null, shown:60, view:'all', rMin:0});
+  Object.assign(state, {mode, genre:'', fmt:'', watch:null, shown:60, view:'all', rMin:0, onlyNew:false});
   const M = MODES[mode];
   ['tabFilms','tabMusic'].forEach(id => $(id).setAttribute('aria-selected', $(id).dataset.mode===mode));
   document.body.dataset.mode = mode;
   $('q').placeholder = M.search; $('wlHead').textContent = M.wlHead; $('wlText').placeholder = M.wlPh; $('wlInfo').textContent = '';
   $('wlHelp').hidden = $('drop').hidden = mode === 'music';
   $('rateField').hidden = mode === 'music';
-  $('sort').innerHTML = M.sorts.map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
-  state.sort = 'year';
+  $('onlyNew').checked = false;
   try { history.replaceState(null, '', mode==='music' ? '#muzyka' : location.pathname + location.search); } catch(e) {}
   $('grid').innerHTML = '<div class="empty">Wczytuję płyty…</div>'; $('meta').innerHTML=''; $('chips').innerHTML=''; $('fmtSeg').innerHTML='';
   try { DATA = await load(mode); }
   catch(e) { DATA = null; $('grid').innerHTML = `<div class="empty">${mode==='music'?'Muzyka nie jest jeszcze pobrana. Pojawi się po najbliższym nocnym odświeżeniu.':'Nie udało się wczytać listy. Odśwież stronę za chwilę.'}</div>`; return; }
   if (state.mode !== mode) return;
+  // „Nowe w bibliotece” ma sens dopiero, gdy harvester zna daty pojawienia się płyt
+  $('sort').innerHTML = M.sorts.filter(([v]) => v !== 'new' || DATA.hasDates).map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
+  state.sort = 'year';
+  $('onlyNewWrap').hidden = !DATA.newCount;
   LIBS = {...LIBS, ...DATA.libs};
   const codes = Object.keys(LIBS).sort((a,b)=> (a==='WYPOZ'?-1:b==='WYPOZ'?1:(parseInt(a.slice(1))||999)-(parseInt(b.slice(1))||999)));
   $('branch').innerHTML = '<option value="">Wszystkie filie</option>' + codes.map(c => { const l=libName(c); return `<option value="${c}">${esc(l.name)}${l.addr?' – '+esc(l.addr):''}</option>`; }).join('');
@@ -339,7 +354,7 @@ async function switchMode(mode){
 }
 
 function availAt(r){ return state.branch ? r.h.filter(h => h[0]===state.branch) : r.h; }
-function filtersActive(){ return state.onlyAvail || state.rMin > 0 || (DATA && (state.yFrom > DATA.minY || state.yTo < DATA.maxY)); }
+function filtersActive(){ return state.onlyAvail || state.onlyNew || state.rMin > 0 || (DATA && (state.yFrom > DATA.minY || state.yTo < DATA.maxY)); }
 function filtered(){
   const q = norm(state.q), fav = favs[state.mode];
   const list = DATA.recs.filter(r => {
@@ -347,6 +362,7 @@ function filtered(){
     if (state.genre && !r.G.includes(state.genre)) return false;
     if (state.fmt && !r.fs.includes(state.fmt)) return false;
     if (state.watch && !state.watch.has(r.id)) return false;
+    if (state.onlyNew && !r.isNew) return false;
     if (r.yn && (r.yn < state.yFrom || r.yn > state.yTo)) return false;
     if (state.rMin > 0 && !(r.rate >= state.rMin)) return false;
     const at = availAt(r);
@@ -359,6 +375,7 @@ function filtered(){
   const byT = (a,b)=>a.t.localeCompare(b.t,'pl');
   const cmp = {
     year:(a,b)=>b.yn-a.yn||byT(a,b), old:(a,b)=>(a.yn||9999)-(b.yn||9999)||byT(a,b), title:byT,
+    new:(a,b)=>(b.n||'').localeCompare(a.n||'')||b.yn-a.yn||byT(a,b),
     avail:(a,b)=>av(b)-av(a)||b.yn-a.yn,
     top:(a,b)=>(b.rate||0)-(a.rate||0)||(b.tmdb?.votes||0)-(a.tmdb?.votes||0),
     artist:(a,b)=>(a.d[0]||'￿').localeCompare(b.d[0]||'￿','pl')||byT(a,b),
@@ -368,21 +385,23 @@ function filtered(){
 function card(r){
   const M = MODES[state.mode], a = availAt(r), n = a.filter(h=>h[1]).length, isFav = favs[state.mode].has(r.id);
   const pill = n ? `<span class="pill ok">${state.branch ? 'Na półce' : n + ' ' + plural(n,'filia','filie','filii')}</span>` : `<span class="pill no">${M.status[1]}</span>`;
-  const poster = r.tmdb?.poster;
+  const img = r.img;
+  const tl = (r.rate?`<span class="badge rate">★ ${r.rate.toFixed(1)}</span>`:'') + (r.isNew?'<span class="badge new">Nowość</span>':'');
   return `<article class="card" data-id="${r.id}">
     <button class="fav" data-fav="${r.id}" aria-pressed="${isFav}" aria-label="${isFav?'Usuń z ulubionych':'Dodaj do ulubionych'}: ${esc(r.t)}">${HEART}</button>
-    <button class="open" aria-label="${esc(r.t)}${r.d[0]?', '+esc(r.d[0]):''}">
-      <div class="case${poster?' has-poster':''}"><div class="art" style="background:${coverStyle(r)}"></div>${poster?`<img class="poster" src="${poster}" alt="" loading="lazy" onerror="this.parentNode.classList.remove('has-poster');this.remove()">`:''}
-        ${r.rate?`<span class="badge rate">★ ${r.rate.toFixed(1)}</span>`:''}${state.watch?'<span class="badge wl">Z listy</span>':''}<span class="badge fmt">${esc(fmtLabel(r))}</span>
+    <button class="open" aria-label="${esc(r.t)}${r.d[0]?', '+esc(r.d[0]):''}${r.isNew?', nowość':''}">
+      <div class="case${img?' has-poster':''}"><div class="art" style="background:${coverStyle(r)}"></div>${img?`<img class="poster" src="${img}" alt="" loading="lazy" onerror="this.parentNode.classList.remove('has-poster');this.remove()">`:''}
+        ${tl?`<div class="tl">${tl}</div>`:''}${state.watch?'<span class="badge wl">Z listy</span>':''}<span class="badge fmt">${esc(fmtLabel(r))}</span>
         <div class="txt"><span></span><span class="ttl">${esc(r.t)}</span><span class="yr">${esc(r.y||'')}${state.mode==='films'&&r.c[0]?' · '+esc(r.c[0]):''}</span></div></div>
-      <div class="under">${poster?`<span class="t2">${esc(r.t)}</span>`:''}<span class="dir">${esc(r.d[0]||r.g[0]||'')}${poster&&r.y?' · '+esc(r.y):''}</span>${pill}</div>
+      <div class="under">${img?`<span class="t2">${esc(r.t)}</span>`:''}<span class="dir">${esc(r.d[0]||r.g[0]||'')}${img&&r.y?' · '+esc(r.y):''}</span>${pill}</div>
     </button></article>`;
 }
 function render(){
   if (!DATA) return;
   const M = MODES[state.mode], list = filtered();
   const totalAvail = list.filter(r => availAt(r).some(h=>h[1])).length;
-  $('meta').innerHTML = `<span><b>${list.length.toLocaleString('pl-PL')}</b> ${plural(list.length,...M.noun)}</span><span><b>${totalAvail.toLocaleString('pl-PL')}</b> dostępnych ${state.branch?'w '+esc(libName(state.branch).name):'w co najmniej jednej filii'}</span>`;
+  $('meta').innerHTML = `<span><b>${list.length.toLocaleString('pl-PL')}</b> ${plural(list.length,...M.noun)}</span><span><b>${totalAvail.toLocaleString('pl-PL')}</b> dostępnych ${state.branch?'w '+esc(libName(state.branch).name):'w co najmniej jednej filii'}</span>`
+    + (DATA.newCount && !state.onlyNew ? `<span><button class="linkish" id="newLink">${DATA.newCount.toLocaleString('pl-PL')} ${plural(DATA.newCount,'nowość','nowości','nowości')}</button> z ostatnich ${NEW_DAYS} dni</span>` : '');
   const emptyMsg = state.view==='fav' && !favs[state.mode].size
     ? 'Nie masz jeszcze ulubionych. Kliknij serduszko na okładce, żeby zapisać płytę na później.'
     : 'Nic nie pasuje do tych filtrów. Spróbuj innej filii albo wyczyść filtry.';
@@ -409,9 +428,10 @@ function openSheet(id){
   const nOk = r.h.filter(h=>h[1]).length, isFav = favs[state.mode].has(r.id);
   const yt = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(M.linkQ(r));
   const tmdbUrl = r.tmdb ? `https://www.themoviedb.org/${r.tmdb.kind==='tv'?'tv':'movie'}/${r.tmdb.id}` : '';
+  const mbUrl = r.mb ? `https://musicbrainz.org/release-group/${encodeURIComponent(r.mb)}` : '';
   $('sheet').innerHTML = `<button class="close" id="sClose" aria-label="Zamknij">×</button>
     <div class="head">
-      <div class="thumb">${r.tmdb?.poster?`<img src="${r.tmdb.poster}" alt="">`:`<div style="position:absolute;inset:0;background:${coverStyle(r)}"></div>`}</div>
+      <div class="thumb">${r.img?`<img src="${r.img}" alt="">`:`<div style="position:absolute;inset:0;background:${coverStyle(r)}"></div>`}</div>
       <div><h2 id="sTitle">${esc(r.t)}</h2>${r.o?`<p class="orig">${esc(r.o)}</p>`:''}
         <p class="stat">${esc(r.y||'')} · ${esc(fmtLabel(r))}${r.rate?` · ★ ${r.rate.toFixed(1)}`:''}<br>
         ${r.h.length ? (nOk ? `<b>Na półce w ${nOk} z ${r.h.length} ${plural(r.h.length,'miejsca','miejsc','miejsc')}</b>` : `<b class="no">Wszystkie egzemplarze wypożyczone</b>`) : ''}</p></div>
@@ -420,6 +440,7 @@ function openSheet(id){
       <a class="btn primary" href="${CAT}${r.id}" target="_blank" rel="noopener">Zarezerwuj w katalogu</a>
       <a class="btn" href="${yt}" target="_blank" rel="noopener">${M.link}</a>
       ${tmdbUrl?`<a class="btn" href="${tmdbUrl}" target="_blank" rel="noopener">TMDB</a>`:''}
+      ${mbUrl?`<a class="btn" href="${mbUrl}" target="_blank" rel="noopener">MusicBrainz</a>`:''}
       <button class="btn" id="sFav" aria-pressed="${isFav}">${isFav?'♥ Zapisane':'♡ Zapisz'}</button>
     </div>
     ${r.tmdb?.overview?`<p style="margin:0">${esc(r.tmdb.overview)}</p>`:''}
@@ -428,6 +449,7 @@ function openSheet(id){
       ${r.c.length?`<dt>Kraj</dt><dd>${esc(r.c.join(', '))}</dd>`:''}
       ${r.g.length?`<dt>Gatunek</dt><dd>${esc(r.g.join(', '))}</dd>`:''}
       ${r.a?`<dt>Dla kogo</dt><dd>${esc(r.a)}</dd>`:''}
+      ${r.n?`<dt>W katalogu od</dt><dd>${esc(fmtDate(r.n))}${r.isNew?' · nowość':''}</dd>`:''}
       <dt>Wypożyczenie</dt><dd>14 dni</dd>
     </dl>
     ${r.alt.length?`<p class="sec">Wydania w katalogu (${r.alt.length+1})</p><div class="actions"><a class="btn" href="${CAT}${r.id}" target="_blank" rel="noopener">${esc(M.fmtName[r.f]||r.f)}${r.y?' · '+esc(r.y):''}</a>${r.alt.map(([id,y,f])=>`<a class="btn" href="${CAT}${id}" target="_blank" rel="noopener">${esc(M.fmtName[f]||f)}${y?' · '+esc(y):''}</a>`).join('')}</div><p class="note">Egzemplarze wszystkich wydań są zebrane na liście poniżej. Rezerwujesz konkretne wydanie.</p>`:''}
@@ -496,6 +518,10 @@ $('tabFilms').addEventListener('click', () => state.mode!=='films' && switchMode
 $('tabMusic').addEventListener('click', () => state.mode!=='music' && switchMode('music'));
 $('viewAll').addEventListener('click', () => { state.view='all'; state.shown=60; syncView(); render(); });
 $('viewFav').addEventListener('click', () => { state.view='fav'; state.shown=60; syncView(); render(); });
+$('meta').addEventListener('click', e => {
+  if (!e.target.closest('#newLink')) return;
+  state.onlyNew = true; $('onlyNew').checked = true; state.sort = 'new'; $('sort').value = 'new'; state.shown = 60; render();
+});
 $('grid').addEventListener('click', e => {
   const f = e.target.closest('.fav');
   if (f) {
@@ -520,9 +546,10 @@ $('yFrom').addEventListener('input', e => { state.yFrom = Math.min(+e.target.val
 $('yTo').addEventListener('input', e => { state.yTo = Math.max(+e.target.value, state.yFrom); e.target.value = state.yTo; syncFilterLabels(); state.shown=60; render(); });
 $('rMin').addEventListener('input', e => { state.rMin = +e.target.value; syncFilterLabels(); state.shown=60; render(); });
 $('onlyAvail').addEventListener('change', e => { state.onlyAvail = e.target.checked; state.shown=60; render(); });
+$('onlyNew').addEventListener('change', e => { state.onlyNew = e.target.checked; state.shown=60; render(); });
 $('clearFilters').addEventListener('click', () => {
-  state.yFrom = DATA.minY; state.yTo = DATA.maxY; state.rMin = 0; state.onlyAvail = false;
-  $('yFrom').value = state.yFrom; $('yTo').value = state.yTo; $('rMin').value = 0; $('onlyAvail').checked = false;
+  state.yFrom = DATA.minY; state.yTo = DATA.maxY; state.rMin = 0; state.onlyAvail = false; state.onlyNew = false;
+  $('yFrom').value = state.yFrom; $('yTo').value = state.yTo; $('rMin').value = 0; $('onlyAvail').checked = false; $('onlyNew').checked = false;
   syncFilterLabels(); render();
 });
 $('moreBtn').addEventListener('click', () => { state.shown += 60; render(); });

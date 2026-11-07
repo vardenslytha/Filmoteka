@@ -1,6 +1,6 @@
 # Półka Raczyńskich
 
-Filmy i muzyka na płytach z katalogu Biblioteki Raczyńskich w Poznaniu, z dostępnością w filiach. Co noc GitHub Actions pobiera katalog, dociąga plakaty z TMDB i publikuje stronę na GitHub Pages. Całość jest darmowa.
+Filmy i muzyka na płytach z katalogu Biblioteki Raczyńskich w Poznaniu, z dostępnością w filiach. GitHub Actions co godzinę pobiera porcję katalogu, dociąga plakaty filmów z TMDB i okładki płyt z MusicBrainz, i publikuje stronę na GitHub Pages. Całość jest darmowa.
 
 ## Uruchomienie (jednorazowo, ok. 10 minut)
 
@@ -10,51 +10,43 @@ Filmy i muzyka na płytach z katalogu Biblioteki Raczyńskich w Poznaniu, z dost
    git init && git add . && git commit -m "Półka Raczyńskich" && git branch -M main
    git remote add origin https://github.com/TWOJ_LOGIN/polka-raczynskich.git && git push -u origin main
    ```
-3. **Settings → Secrets and variables → Actions → New repository secret**: nazwa `TMDB_API_KEY`, wartość: Twój klucz API (v3) z TMDB. Bez sekretu strona działa, tylko bez plakatów.
+3. **Settings → Secrets and variables → Actions → New repository secret**: nazwa `TMDB_API_KEY`, wartość: Twój klucz API (v3) z TMDB. Bez sekretu strona działa, tylko bez plakatów filmów. Okładki płyt nie wymagają klucza.
 4. **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-5. **Actions → Odśwież półkę → Run workflow**. Pierwsze uruchomienie trwa ok. 15–30 minut (pełny katalog i wszystkie okładki). Kolejne noce są szybsze, bo okładki są w cache.
+5. **Actions → Odśwież półkę → Run workflow**. Pełny cykl to kilka godzinnych porcji; strona publikuje się po każdej.
 6. Adres strony pojawi się w podsumowaniu uruchomienia i w Settings → Pages: `https://TWOJ_LOGIN.github.io/polka-raczynskich/`.
 
 ## Co jest w środku
 
 | Plik | Rola |
 |---|---|
-| `harvester/harvest.mjs` | Pobiera z katalogu Primo filmy (`RTYPE=videos`) albo muzykę (`RTYPE=audios`), rok po roku, z przerwami między zapytaniami |
-| `harvester/enrich-tmdb.mjs` | Dodaje plakaty, oceny, opisy i czyste polskie tytuły z TMDB |
+| `harvester/harvest.mjs` | Pobiera z katalogu Primo filmy (`RTYPE=videos`) albo muzykę (`RTYPE=audios`), porcjami z wznawianiem |
+| `harvester/enrich-tmdb.mjs` | Plakaty, oceny, opisy i czyste polskie tytuły filmów z TMDB |
+| `harvester/enrich-music.mjs` | Okładki płyt z MusicBrainz i Cover Art Archive (1 zapytanie/s, porcjami, z cache) |
 | `site/index.html` | Strona (bez frameworków, jeden plik) |
-| `site/films.json`, `site/music.json` | Dane; w repo leży próbka 142 filmów, workflow tworzy pełne pliki co noc |
-| `.github/workflows/odswiez-polke.yml` | Harmonogram: codziennie ok. 2:17, filmy i muzyka pobierają się równolegle; jest też ręczny przycisk |
+| `site/films.json`, `site/music.json` | Dane; workflow tworzy je i publikuje |
+| `.github/workflows/odswiez-polke.yml` | Co godzinę porcja pobierania (do 45 min) z wznawianiem; filmy i muzyka równolegle; ręczny przycisk |
 
 ## Warto wiedzieć
 
-- **Dostępność** jest aktualna na moment nocnego pobrania. W ciągu dnia mogła się zmienić; strona to mówi.
+- **Podsumowanie przebiegu**: w Actions kliknij przebieg; na jego stronie (Summary) jest tabelka dla filmów, muzyki i okładek: rekordy, strony, blokady, pominięte strony, luki w kontroli kompletności.
+- **Dostępność** jest aktualna na moment pobrania. W ciągu dnia mogła się zmienić; strona to mówi.
 - **GitHub wyłącza zaplanowane uruchomienia** w repo bez żadnej aktywności przez 60 dni. Dostaniesz wtedy maila; wystarczy kliknąć „Enable workflow” albo zrobić dowolny commit.
-- **Czas i obciążenie**: katalog ogranicza tempo zapytań z jednego adresu (przy ok. 17 stronach na minutę po ~3 minutach zaczyna odmawiać). Harvester startuje od 2 zapytań naraz, a przy pierwszej odmowie robi przerwę, przechodzi na jedno zapytanie i ponawia stronę, więc nic nie przepada. Filmy i muzyka pobierają się równolegle na dwóch maszynach GitHuba; całość trwa ok. 30–45 minut, raz na dobę.
-- **Uprzejmość wobec biblioteki**: przy publicznym starcie warto napisać do Biblioteki Raczyńskich, co to jest. Może zechcą to polecać czytelnikom.
-- **TMDB** wymaga stopki z informacją o źródle (jest na stronie) i do użytku komercyjnego osobnej licencji.
-
-## Hosting na Netlify zamiast Pages
-
-Pobieranie i tak musi zostać w GitHub Actions (funkcje Netlify mają limit ok. 30 s, a pobranie trwa kilkanaście minut). Zmienia się tylko publikacja:
-
-1. Na Netlify: **Add new site → Deploy manually**, wrzuć folder `site`. Zapisz **Site ID** (Site configuration → General).
-2. Netlify: **User settings → Applications → Personal access tokens → New access token**.
-3. W GitHub dodaj sekrety `NETLIFY_AUTH_TOKEN` i `NETLIFY_SITE_ID`.
-4. W workflow usuń kroki `configure-pages`, `upload-pages-artifact` oraz cały job `deploy`, a na końcu jobu `build` dodaj:
-   ```yaml
-         - name: Publikuj na Netlify
-           env:
-             NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-             NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-           run: npx --yes netlify-cli deploy --dir=site --prod
-   ```
+- **Jak harvester oszczędza katalog**: gość widzi najwyżej 500 wyników jednego wyszukiwania, a dalsze strony dużych wyników katalog często liczy dłużej niż 30 s. Dlatego każdy przedział lat z ponad 100 pozycjami jest dzielony na wyszukiwania po pierwszej literze tytułu (cyfry i a–z; „s…” obejmuje też „ś…”). Litery, które w całości zmieściły się na pierwszej stronie roku, są pomijane. Pyta po jednym zapytaniu naraz.
+- **Kontrola kompletności**: dla każdego podzielonego roku liczba różnych rekordów ze wszystkich liter jest porównywana z liczbą wyników roku. Przy brakach harvester raz ponawia litery, które dały 0; resztę zgłasza w podsumowaniu jako lukę.
+- **Zacięte strony**: katalog czasem nie oddaje strony przez kilkanaście minut. Harvester ponawia ją z rosnącymi przerwami (30 s … 10 min), a po 5 próbach pomija i zgłasza w podsumowaniu.
+- **Porcje i wznawianie**: workflow rusza co godzinę, a gdy cykl jest w toku, każdy przebieg od razu zamawia następny (harmonogram GitHuba bywa zawodny). Każdy przebieg pobiera do ok. 45 minut, zapisuje postęp (cache GitHuba) i publikuje stronę: pozycje już odświeżone w tym cyklu plus reszta z poprzedniego pełnego cyklu. Po pełnym cyklu przez ok. 20 h katalog nie jest odpytywany.
+- **Okładki płyt**: MusicBrainz pozwala na 1 zapytanie na sekundę, więc pierwsze uzupełnienie trwa kilka godzin rozłożonych na przebiegi (w godzinach bez pobierania katalogu po 50 min). Płyty bez wykonawcy (składanki) są pomijane, a okładka wymaga zgodności tytułu i wykonawcy, żeby nie pokazać cudzej.
+- **Nowości**: harvester zapamiętuje, kiedy pierwszy raz zobaczył dany rekord. Daty zaczynają się po pierwszym pełnym cyklu v9; od tego momentu strona pokazuje odznakę „Nowość” (30 dni) i sortowanie „Nowe w bibliotece”.
+- **Uprzejmość wobec biblioteki**: przy publicznym starcie warto napisać do Biblioteki Raczyńskich, co to jest.
+- **TMDB** wymaga stopki z informacją o źródle (jest na stronie) i do użytku komercyjnego osobnej licencji. Dane MusicBrainz są na licencji CC0, okładki pochodzą z Cover Art Archive.
 
 ## Lokalnie
 
 ```
 RTYPE=videos node harvester/harvest.mjs > films.json
-RTYPE=audios node harvester/harvest.mjs > site/music.json
+RTYPE=audios node harvester/harvest.mjs > music-raw.json
 node harvester/enrich-tmdb.mjs films.json tmdb-cache.json > site/films.json   # klucz w harvester/.env
+node harvester/enrich-music.mjs music-raw.json mb-cache.json > site/music.json
 npx serve site
 ```
-Strony nie da się otworzyć podwójnym kliknięciem (`file://`), bo przeglądarka blokuje wczytanie `films.json`. Potrzebny jest serwer, choćby `npx serve`.
+Strony nie da się otworzyć podwójnym kliknięciem (`file://`), bo przeglądarka blokuje wczytanie danych. Potrzebny jest serwer, choćby `npx serve`.

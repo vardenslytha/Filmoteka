@@ -1,4 +1,4 @@
-// Harvester katalogu Primo VE (Biblioteka Raczyńskich) – filmy i muzyka na płytach.
+// Harvester katalogu Primo VE (Biblioteka Raczyńskich) – filmy i muzyka na płytach. Wersja v9.
 // Uruchom (Node 18+, bez zależności):
 //   RTYPE=videos node harvest.mjs > films.json     (filmy i seriale)
 //   RTYPE=audios node harvest.mjs > music.json     (muzyka; audiobooki są pomijane)
@@ -6,7 +6,7 @@
 
 import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync } from 'node:fs';
 
-const HOST = 'https://omnis-br.primo.exlibrisgroup.com';
+const HOST = process.env.PRIMO_HOST || 'https://omnis-br.primo.exlibrisgroup.com'; // PRIMO_HOST tylko do testów
 const INST = '48OMNIS_BRP';
 const VID = '48OMNIS_BRP:BRACZ';
 const RTYPE = process.env.RTYPE || 'videos';
@@ -19,24 +19,25 @@ const TERMS = MUSIC
 const PAGE = 100;          // 100 wyników trwa tyle co 50, więc o połowę mniej zapytań
 // Gość widzi najwyżej 500 wyników jednego wyszukiwania (dalej: 401 „Restricted offset for guest users”).
 const GUEST_MAX = 500;
-// Przedział z większą liczbą wyników dzielimy na wyszukiwania po pierwszej literze tytułu.
-// Polskie litery są osobno („s” ≠ „ś”), cyfry też.
-// Dalsze strony (przesunięcie 100+) dużych wyników katalog często liczy dłużej niż 30 s i zwraca pustą listę,
-// więc dzielimy literami już każdy przedział większy niż jedna strona. Litery to zwykle po kilkadziesiąt pozycji.
+// Przedział z więcej niż jedną stroną wyników dzielimy na wyszukiwania po pierwszej literze tytułu:
+// dalsze strony (przesunięcie 100+) katalog często liczy dłużej niż 30 s i zwraca pustą listę.
 const SPLIT_ABOVE = Number(process.env.SPLIT_ABOVE || 100);
-const LETTERS = [...'abcdefghijklmnopqrstuvwxyz0123456789', 'ć', 'ł', 'ó', 'ś', 'ź', 'ż'];
-// Przeciążony katalog ucina zapytanie po ~30 s i zwraca pustą listę. Po jednym zapytaniu naraz
-// (jak w jedynym w pełni udanym przebiegu) katalog odpowiada w ~8 s. Można podnieść zmienną CONCURRENCY.
+// Kolejność jak w sortowaniu katalogu: cyfry, potem litery. Bez ć ł ó ś ź ż: wyszukiwanie „s…” łapie też „ś…”
+// (przebieg v6: polskie litery nie dodały ani jednego rekordu, a suma a–z i cyfr równa się liczbie wyników roku).
+const LETTERS = [...'0123456789abcdefghijklmnopqrstuvwxyz'];
+// Przeciążony katalog ucina zapytanie po ~30 s i zwraca pustą listę. Po jednym zapytaniu naraz odpowiada w ~1–8 s.
 const START_CONCURRENCY = Number(process.env.CONCURRENCY || 1);
 const DELAY_MS = Number(process.env.DELAY_MS || 500);   // przerwa po każdej stronie
-const THROTTLE_PAUSE_MS = Number(process.env.THROTTLE_PAUSE_MS || 30_000); // przerwa, gdy katalog nie zdążył odpowiedzieć
-const MAX_REQUEUE = 5;        // tyle razy ponawiamy jedną stronę, zanim ją pominiemy
+// Przerwy przed kolejnymi próbami tej samej strony (s). Przebieg v6: zacięta strona przeszła po ~15 min,
+// więc ostatnie próby czekają długo. Po wyczerpaniu listy strona jest pomijana (i trafia do podsumowania).
+const PAUSES = (process.env.PAUSES || '30,60,120,300,600').split(',').map(Number);
+const MAX_REQUEUE = PAUSES.length;
 
 // ---------- wznawianie ----------
 // CHECKPOINT: plik z postępem; kolejne uruchomienie zaczyna tam, gdzie skończyło poprzednie.
 // MAX_MINUTES: po tylu minutach harvester sam kończy pracę i zapisuje postęp (przed limitem GitHuba).
 // FRESH_HOURS: po ukończonym cyklu przez tyle godzin nie pobieramy od nowa.
-// OUT: plik wynikowy (bez OUT wynik idzie na standardowe wyjście, jak dawniej).
+// OUT: plik wynikowy (bez OUT wynik idzie na standardowe wyjście).
 const CHECKPOINT = process.env.CHECKPOINT || '';
 const MAX_MINUTES = Number(process.env.MAX_MINUTES || 0);
 const FRESH_HOURS = Number(process.env.FRESH_HOURS || 20);
@@ -46,7 +47,8 @@ const MAX_PAGES = Number(process.env.MAX_PAGES || 0); // tylko do testów: przer
 const OUT = process.env.OUT || '';
 // BASE: opcjonalny plik z poprzednio opublikowanymi danymi; podstawa dla pierwszego cyklu, zanim powstanie pełny zbiór.
 const BASE = process.env.BASE || '';
-const CKPT_VERSION = 1;
+const CKPT_VERSION = 1;            // v9 czyta punkty kontrolne v8 (nowe pola są opcjonalne)
+const TODAY = new Date().toISOString().slice(0, 10);
 
 function setState(state) {
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `state=${state}\n`);
@@ -54,13 +56,13 @@ function setState(state) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (s) => process.stderr.write(s);
+const fold = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ł/g, 'l');
 
 // Przedziały lat: starsze lata mają mało rekordów, więc łączymy je w paczki.
 function yearRanges(to) {
-  const r = MUSIC
+  return MUSIC
     ? [[1900, 1949], ...range(1950, to).map((y) => [y, y])]
     : [[1900, 1959], [1960, 1979], [1980, 1989], [1990, 1999], ...range(2000, to).map((y) => [y, y])];
-  return r;
 }
 function range(a, b) { const out = []; for (let y = a; y <= b; y++) out.push(y); return out; }
 
@@ -91,11 +93,11 @@ async function search(jwt, { term, from, to, offset, prefix }) {
 
 // Katalog dokleja do tytułu ekipę i wytwórnie ("... directed by ...", "reżyseria ...").
 const CREDITS = /\s+(?:(?:a\s+)?film\s+by|produced|production|presents|directed|written|screenplay|created|reżyseria|scenariusz|Disney|HBO|Warner|Universal|Paramount|Netflix|Sony|Lionsgate|Studio)\b.*$/i;
+const ORIG_PREFIX = /^(?:Tytuł oryginału|Tyt\.?\s*oryg\.?)\s*:\s*/i;
 const cut = (s) => (s || '').split(' / ')[0].split(' ; ')[0].replace(CREDITS, '')
   .replace(/\s*[\[(]film[\])]\s*/gi, ' ').replace(ORIG_PREFIX, '')
   .replace(/\s+reż\.[\s,:].*$/i, '').replace(/\s+scen\.[\s,:].*$/i, '').replace(/\s+film\s+\p{Lu}[\p{L}-]+(?:\s+\p{Lu}[\p{L}-]+)+\.?$/u, '')
   .replace(/,\s*\d{4}$/, '').replace(/\s*:\s*$/, '').replace(/\s+/g, ' ').trim();
-const ORIG_PREFIX = /^(?:Tytuł oryginału|Tyt\.?\s*oryg\.?)\s*:\s*/i;
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 const person = (s) => (s || '').split('$$')[0].replace(/\s*\(\d{4}-?\s*\d*\s*\)/g, '')
   .replace(/\s*\((zespół muzyczny|aktor(ka)?|.*?)\)/gi, '')
@@ -133,6 +135,8 @@ function holdingsOf(doc, libs) {
     return [h.libraryCode, h.availabilityStatus === 'available' ? 1 : 0];
   });
 }
+
+const docId = (d) => d.pnx?.display?.mms?.[0] || d.pnx?.control?.recordid?.[0] || '';
 
 function filmRecord(doc, from, to, libs) {
   const p = doc.pnx.display;
@@ -192,8 +196,7 @@ function musicRecord(doc, from, to, libs) {
   // katalog dokleja wykonawcę na końcu tytułu: "25 Adele.", "Amandla Miles Davis."
   title = title.replace(/\.\s*$/, '');
   for (const n of uniq) {
-    const variants = [n, n.replace(/^The\s+/i, '')];
-    for (const v of variants) {
+    for (const v of [n, n.replace(/^The\s+/i, '')]) {
       if (v && title.length > v.length + 1 && title.toLowerCase().endsWith(' ' + v.toLowerCase())) {
         title = title.slice(0, -v.length).trim().replace(/[.,:;]\s*$/, '');
       }
@@ -210,7 +213,6 @@ function musicRecord(doc, from, to, libs) {
   };
 }
 
-
 // ---------- łączenie wydań ----------
 // Ta sama praca w kilku wydaniach (inne lata płyty, DVD i Blu-ray) to w katalogu osobne rekordy.
 // Łączymy je po tytule i reżyserze (filmy) albo wykonawcy (muzyka); bez twórcy także po roku.
@@ -223,7 +225,6 @@ function creatorKey(r) {
   return keyNorm(surname);
 }
 function groupEditions(recs) {
-  // najpierw po tytule, potem w obrębie tytułu po twórcy
   const byTitle = new Map();
   for (const r of recs) {
     const k = keyNorm(r.t);
@@ -257,6 +258,7 @@ function groupEditions(recs) {
     const byLib = new Map();
     for (const r of g) for (const [code, ok] of r.h) byLib.set(code, Math.max(byLib.get(code) ?? 0, ok));
     const years = g.map((r) => Number(r.y)).filter(Boolean);
+    const firstSeen = g.map((r) => r.n || '').sort().pop();
     out.push({
       ...main,
       o: main.o || g.find((r) => r.o)?.o,
@@ -265,10 +267,17 @@ function groupEditions(recs) {
       c: main.c?.length ? main.c : g.find((r) => r.c?.length)?.c,
       fs: [...new Set(g.flatMap((r) => r.fs || [r.f]))],
       h: [...byLib.entries()],
+      n: firstSeen || undefined, // nowe wydanie starego tytułu też jest nowością na półce
       alt: [...g.slice(1).map((r) => [r.id, r.y, r.f]), ...g.flatMap((r) => r.alt || [])].filter((a, i, arr) => a[0] !== main.id && arr.findIndex((b) => b[0] === a[0]) === i),
     });
   }
   return out;
+}
+
+// ---------- podsumowanie przebiegu (strona przebiegu w GitHub Actions) ----------
+function writeSummary(lines) {
+  if (!process.env.GITHUB_STEP_SUMMARY) return;
+  appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.filter((l) => l !== null).join('\n') + '\n\n');
 }
 
 // ---------- główna pętla ----------
@@ -278,23 +287,35 @@ async function main() {
   const started = Date.now();
   const mins = () => ((Date.now() - started) / 60000).toFixed(1);
   const toRecord = MUSIC ? musicRecord : filmRecord;
+  const kindName = MUSIC ? 'Muzyka' : 'Filmy';
   const records = new Map();
   let libs = {};
   const sliceTotal = new Map();      // liczba wyników przedziału z jego pierwszej strony
-  let errors = 0, pagesDone = 0, pagesKnown = 0, throttles = 0, pagesThisRun = 0;
+  // Przedziały podzielone na litery: identyfikatory zebrane ze wszystkich ich wyszukiwań, do kontroli kompletności.
+  const split = new Map();
+  let skippedPages = [], gaps = [];
+  let errors = 0, pagesDone = 0, pagesKnown = 0, throttles = 0, pagesThisRun = 0, lettersSaved = 0;
   let concurrency = START_CONCURRENCY, pauseUntil = 0;
   let queue = [];
   const inFlight = new Set();       // strony w drodze; przy zapisie wracają do kolejki
   let cycleStartedAt = new Date().toISOString();
   // poprzedni pełny zbiór (surowe rekordy); po każdej porcji publikujemy nowe rekordy + resztę z niego
   let prev = [];
+  // Data pierwszego zauważenia rekordu ("nowości"). '' = rekord znany od początku śledzenia.
+  // Daty zaczynamy wpisywać dopiero po pierwszym pełnym cyklu v9, żeby uzupełnione braki nie udawały nowości.
+  let seen = {}, seenReady = false;
 
   // --- punkt kontrolny ---
   const ck = CHECKPOINT && existsSync(CHECKPOINT) ? (() => { try { return JSON.parse(readFileSync(CHECKPOINT, 'utf8')); } catch { return null; } })() : null;
   const ckValid = ck && ck.v === CKPT_VERSION && ck.rtype === RTYPE;
   if (ckValid && Array.isArray(ck.prev)) prev = ck.prev;
+  if (ckValid) { seen = ck.seen || {}; seenReady = !!ck.seenReady; }
   if (!prev.length && BASE && existsSync(BASE)) {
     try { prev = JSON.parse(readFileSync(BASE, 'utf8')).recs || []; log(`Podstawa z opublikowanej strony: ${prev.length} pozycji.\n`); } catch {}
+  }
+  for (const r of prev) {
+    if (!(r.id in seen)) seen[r.id] = r.n || '';
+    for (const a of r.alt || []) if (!(a[0] in seen)) seen[a[0]] = r.n || '';
   }
   if (ckValid && ck.done && Date.now() - Date.parse(ck.completedAt) < FRESH_HOURS * 3600e3) {
     log(`Dane z ${ck.completedAt} są świeże (< ${FRESH_HOURS} h). Nic do pobrania.\n`);
@@ -305,6 +326,8 @@ async function main() {
     for (const r of ck.records) records.set(r.id, r);
     libs = ck.libs || {};
     for (const [k, v] of ck.sliceTotal || []) sliceTotal.set(k, v);
+    for (const [k, s] of ck.split || []) split.set(k, { ...s, ids: new Set(s.ids) });
+    skippedPages = ck.skippedPages || []; gaps = ck.gaps || [];
     queue = ck.queue || [];
     pagesDone = ck.pagesDone || 0; pagesKnown = ck.pagesKnown || 0;
     cycleStartedAt = ck.cycleStartedAt;
@@ -321,32 +344,38 @@ async function main() {
       completedAt: done ? new Date().toISOString() : undefined,
       pagesDone, pagesKnown, libs, sliceTotal: [...sliceTotal.entries()],
       queue: done ? [] : [...inFlight, ...queue].map((t) => ({ ...t, tries: 0 })), records: done ? [] : [...records.values()],
+      split: done ? [] : [...split].map(([k, s]) => [k, { ...s, ids: [...s.ids] }]),
+      skippedPages: done ? [] : skippedPages, gaps: done ? [] : gaps,
+      seen, seenReady: seenReady || done,
       prev: done ? [...records.values()] : prev };
     writeFileSync(CHECKPOINT + '.tmp', JSON.stringify(data));
     renameSync(CHECKPOINT + '.tmp', CHECKPOINT);
   }
 
-  // Token gościa jest ważny 24 h; nowy pobieramy tylko po odmowie.
+  // Token gościa jest ważny 24 h i każde pobranie tworzy nowego anonimowego użytkownika,
+  // więc nowy bierzemy tylko po odmowie autoryzacji (401/403).
   let jwt = await guestJwt();
 
   const label = (t) => `${t.from === t.to ? t.from : t.from + '-' + t.to}${t.prefix ? ' „' + t.prefix + '…”' : ''}`;
+  const sliceKey = (t) => `${t.from}-${t.to}|${t.term}|${t.prefix || ''}`;
+  const baseKey = (t) => `${t.from}-${t.to}|${t.term}`;
 
-  async function throttled(task, why) {
+  async function throttled(task, why, auth) {
     throttles++;
-    // stała przerwa; dłuższa dopiero przy kolejnych odmowach tej samej strony
-    const pause = THROTTLE_PAUSE_MS * Math.min(task.tries + 1, 4);
+    const pause = (PAUSES[Math.min(task.tries, PAUSES.length - 1)] || 30) * 1000;
     pauseUntil = Math.max(pauseUntil, Date.now() + pause);
     if (concurrency > 1) concurrency = 1;
     task.tries++;
     if (task.tries > MAX_REQUEUE) {
       errors++;
+      skippedPages.push(`${label(task)} @${task.offset}`);
       log(`[${mins()} min] POMINIĘTO ${label(task)} @${task.offset} po ${MAX_REQUEUE} próbach (${why})\n`);
       if (errors > 40) throw new Error('Za dużo pominiętych stron, przerywam.');
       return;
     }
-    log(`[${mins()} min] katalog nie odpowiedział (${why}); przerwa ${pause / 1000} s, potem ponawiam tę stronę\n`);
+    log(`[${mins()} min] katalog nie odpowiedział (${why}); przerwa ${pause / 1000} s, potem ponawiam ${label(task)} @${task.offset}\n`);
     queue.unshift(task);             // ta sama strona wraca na początek kolejki
-    try { jwt = await guestJwt(); } catch {}
+    if (auth) { try { jwt = await guestJwt(); } catch {} }
   }
 
   async function runTask(task) {
@@ -356,7 +385,7 @@ async function main() {
     try {
       json = await search(jwt, task);
     } catch (e) {
-      if (e.status === 401 || e.status === 403 || e.status === 429 || e.status >= 500 || !e.status) return throttled(task, e.message);
+      if (e.status === 401 || e.status === 403 || e.status === 429 || e.status >= 500 || !e.status) return throttled(task, e.message, e.status === 401 || e.status === 403);
       throw e;
     }
     if (json.errorCode) {
@@ -365,62 +394,130 @@ async function main() {
       return;
     }
     const total = json.info?.total ?? 0;
-    const n = (json.docs || []).length;
-    const sk = `${task.from}-${task.to}|${task.term}|${task.prefix || ''}`;
+    const docs = json.docs || [];
+    const n = docs.length;
+    const sk = sliceKey(task);
     const known = sliceTotal.get(sk);
     // Pusta odpowiedź tam, gdzie wcześniej były wyniki = blokada, nie koniec danych.
     if (task.offset > 0 && (total === 0 || n === 0)) return throttled(task, 'pusta strona w środku wyników');
+    if (task.offset === 0 && total === 0 && known > 0) return throttled(task, `pusty wynik, a wcześniej było ${known}`);
     // Pusty przedział sprawdzamy jeszcze raz na końcu kolejki (bez przerwy): bywa prawdziwy, bywa blokadą.
     if (task.offset === 0 && total === 0 && !task.rechecked) { queue.push({ ...task, rechecked: true }); return; }
     const expected = Math.min(PAGE, (known ?? total) - task.offset);
     if (n < expected && task.tries < MAX_REQUEUE) return throttled(task, `niepełna strona ${n}/${expected}`);
 
     pagesDone++; pagesThisRun++;
+    const bk = baseKey(task);
     if (task.offset === 0) {
       sliceTotal.set(sk, total);
+      if (task.prefix && total === 0) {
+        const s = split.get(bk);
+        if (s && !s.zeros.includes(task.prefix)) s.zeros.push(task.prefix);
+      }
       if (!task.prefix && total > SPLIT_ABOVE) {
-        // za dużo dla gościa: ten przedział pobieramy literami (pierwsza strona i tak się przyda)
-        for (const L of LETTERS) { queue.push({ ...task, prefix: L, offset: 0, tries: 0, rechecked: true }); pagesKnown++; }
-        log(`${label(task)}: ${total} wyników, dzielę na ${LETTERS.length} wyszukiwań po pierwszej literze tytułu\n`);
+        // Za dużo na jedną stronę: przedział pobieramy literami.
+        // Tytuły przed ostatnim tytułem tej strony (w kolejności sortowania katalogu) już mamy,
+        // więc litery w całości przed nim pomijamy. Bez pola sort.title pytamy o wszystkie.
+        const lastSort = fold(docs.at(-1)?.pnx?.sort?.title?.[0]).replace(/^[^a-z0-9]+/, '');
+        const edge = n === PAGE && lastSort ? LETTERS.indexOf(lastSort[0]) : -1;
+        const skip = edge > 0 ? LETTERS.slice(0, edge) : [];
+        const todo = LETTERS.slice(skip.length);
+        lettersSaved += skip.length;
+        split.set(bk, { task: { term: task.term, from: task.from, to: task.to }, label: label(task), total,
+          ids: new Set(), zeros: [], skipped: skip, retried: false, done: false });
+        for (const L of todo) { queue.push({ ...task, prefix: L, offset: 0, tries: 0, rechecked: true }); pagesKnown++; }
+        log(`${label(task)}: ${total} wyników, ${todo.length} wyszukiwań po pierwszej literze${skip.length ? ` (pominięte jako pobrane: ${skip.join('')})` : ''}\n`);
       } else {
         if (total > GUEST_MAX) log(`Uwaga: ${label(task)} ma ${total} wyników, pobiorę tylko pierwsze ${GUEST_MAX}\n`);
         for (let off = PAGE; off < Math.min(total, GUEST_MAX); off += PAGE) { queue.push({ ...task, offset: off, tries: 0 }); pagesKnown++; }
       }
     }
-    for (const d of json.docs || []) {
+    const s = split.get(bk);
+    for (const d of docs) {
+      if (s) { const id = docId(d); if (id) s.ids.add(id); }
       const rec = toRecord(d, task.from, task.to, libs);
-      if (rec && !records.has(rec.id)) records.set(rec.id, rec);
+      if (rec && !records.has(rec.id)) {
+        records.set(rec.id, rec);
+        if (!(rec.id in seen)) seen[rec.id] = seenReady ? TODAY : '';
+      }
     }
     log(`[${mins()} min] strony ${pagesDone}/${pagesKnown} · ${label(task)} @${task.offset}/${total} → ${records.size} rekordów\n`);
   }
 
+  // Kontrola kompletności podzielonych przedziałów: liczba różnych rekordów ze wszystkich liter
+  // powinna równać się liczbie wyników całego przedziału. Jeśli brakuje, raz ponawiamy litery,
+  // które dały 0 (bywa to blokada udająca pusty wynik) albo zostały pominięte jako pobrane.
+  function verify() {
+    let added = 0;
+    for (const s of split.values()) {
+      if (s.done) continue;
+      const missing = s.total - s.ids.size;
+      if (missing > 0 && !s.retried) {
+        s.retried = true;
+        const again = [...new Set([...s.zeros, ...s.skipped])];
+        s.zeros = [];
+        if (again.length) {
+          for (const L of again) { queue.push({ ...s.task, prefix: L, offset: 0, tries: 0, rechecked: true }); pagesKnown++; }
+          added += again.length;
+          log(`${s.label}: brakuje ${missing} z ${s.total}, ponawiam litery ${again.join(' ')}\n`);
+          continue;
+        }
+      }
+      s.done = true;
+      if (missing > 0) { gaps.push(`${s.label}: brakuje ${missing} z ${s.total}`); log(`Luka: ${s.label} – brakuje ${missing} z ${s.total}\n`); }
+    }
+    return added;
+  }
+
   const outOfTime = () => (MAX_MINUTES && Date.now() - started > MAX_MINUTES * 60000) || (MAX_PAGES && pagesThisRun >= MAX_PAGES);
   let stoppedEarly = false, lastSaved = 0;
+  const drain = () => new Promise((resolve, reject) => {
+    let active = 0, failed = false;
+    const next = () => {
+      if (failed) return;
+      if (outOfTime() && queue.length) { stoppedEarly = true; if (active === 0) resolve(); return; }
+      if (!queue.length && active === 0) return resolve();
+      while (active < concurrency && queue.length && !outOfTime()) {
+        const task = queue.shift();
+        active++; inFlight.add(task);
+        runTask(task)
+          .finally(() => inFlight.delete(task))
+          .then(() => { if (pagesThisRun - lastSaved >= SAVE_EVERY) { saveCheckpoint(); lastSaved = pagesThisRun; } })
+          .then(() => sleep(DELAY_MS))
+          .then(() => { active--; next(); }, (e) => { failed = true; reject(e); });
+      }
+      if (outOfTime() && queue.length && active === 0) { stoppedEarly = true; resolve(); }
+    };
+    next();
+  });
   try {
-    await new Promise((resolve, reject) => {
-      let active = 0, failed = false;
-      const next = () => {
-        if (failed) return;
-        if (outOfTime() && queue.length) { stoppedEarly = true; if (active === 0) resolve(); return; }
-        if (!queue.length && active === 0) return resolve();
-        while (active < concurrency && queue.length && !outOfTime()) {
-          const task = queue.shift();
-          active++; inFlight.add(task);
-          runTask(task)
-            .finally(() => inFlight.delete(task))
-            .then(() => { if (pagesThisRun - lastSaved >= SAVE_EVERY) { saveCheckpoint(); lastSaved = pagesThisRun; } })
-            .then(() => sleep(DELAY_MS))
-            .then(() => { active--; next(); }, (e) => { failed = true; reject(e); });
-        }
-        if (outOfTime() && queue.length && active === 0) { stoppedEarly = true; resolve(); }
-      };
-      next();
-    });
+    for (;;) {
+      await drain();
+      if (stoppedEarly || !verify()) break;
+    }
   } catch (e) {
     saveCheckpoint();                // nawet po błędzie następny przebieg wznowi pracę
     setState('partial-nopub');       // wyniku nie zapisaliśmy, więc nic nie publikujemy
+    writeSummary([`### ${kindName}: błąd`, '', '```', String(e.message || e), '```']);
     throw e;
   }
+
+  const withN = (r) => ({ ...r, n: seen[r.id] || undefined });
+  const summaryLines = (title, extra) => [
+    `### ${kindName}: ${title}`, '',
+    '| | |', '|---|---|',
+    `| Cykl od | ${cycleStartedAt.replace('T', ' ').slice(0, 16)} UTC |`,
+    `| Rekordy w cyklu | ${records.size} |`,
+    ...extra,
+    `| Strony (cykl / ten przebieg) | ${pagesDone} / ${pagesThisRun} |`,
+    `| Litery pominięte jako już pobrane | ${lettersSaved} |`,
+    `| Blokady (ponowienia) | ${throttles} |`,
+    `| Pominięte strony | ${skippedPages.length} |`,
+    `| Luki w kontroli kompletności | ${gaps.length} |`,
+    `| Czas tego przebiegu | ${mins()} min |`,
+    skippedPages.length ? '\n**Pominięte strony:** ' + skippedPages.join(', ') : null,
+    gaps.length ? '\n**Luki:** ' + gaps.join('; ') : null,
+  ];
 
   if (stoppedEarly) {
     saveCheckpoint();
@@ -430,26 +527,31 @@ async function main() {
       // pozycję z poprzedniego zbioru pomijamy, jeśli odświeżyliśmy ją albo którekolwiek z jej wydań
       const fresh = new Set(records.keys());
       const mix = new Map(prev.filter((r) => !fresh.has(r.id) && !(r.alt || []).some((a) => fresh.has(a[0]))).map((r) => [r.id, r]));
-      for (const r of records.values()) mix.set(r.id, r);
+      for (const r of records.values()) mix.set(r.id, withN(r));
       const merged = groupEditions([...mix.values()]);
       const result = JSON.stringify({ kind: MUSIC ? 'music' : 'films', harvestedAt: new Date().toISOString(), cycleStartedAt,
         partial: true, refreshed: records.size, libs: { ...(ck?.libs || {}), ...libs }, recs: merged });
       if (OUT) writeFileSync(OUT, result); else process.stdout.write(result);
       log(`Publikuję porcję: ${records.size} odświeżonych + reszta z poprzedniego zbioru = ${merged.length} pozycji.\n`);
       setState('partial');
+      writeSummary(summaryLines('porcja (cykl w toku)', [`| Na stronie po połączeniu | ${merged.length} |`, `| Zostało stron w kolejce | ${queue.length} |`]));
     } else {
       log('Brak poprzedniego pełnego zbioru, więc tej porcji jeszcze nie publikuję.\n');
       setState('partial-nopub');
+      writeSummary(summaryLines('porcja bez publikacji (brak poprzedniego zbioru)', [`| Zostało stron w kolejce | ${queue.length} |`]));
     }
     return;
   }
 
-  const merged = groupEditions([...records.values()]);
+  const merged = groupEditions([...records.values()].map(withN));
   const result = JSON.stringify({ kind: MUSIC ? 'music' : 'films', harvestedAt: new Date().toISOString(), cycleStartedAt, libs, recs: merged });
   if (OUT) writeFileSync(OUT, result); else process.stdout.write(result);
+  const newCount = merged.filter((r) => r.n === TODAY).length;
   saveCheckpoint(true);
-  log(`Gotowe (cykl od ${cycleStartedAt}): ${records.size} rekordów → ${merged.length} po połączeniu wydań, ${pagesDone} stron, w tym przebiegu ${pagesThisRun}, blokad: ${throttles}, pominiętych stron: ${errors}\n`);
+  log(`Gotowe (cykl od ${cycleStartedAt}): ${records.size} rekordów → ${merged.length} po połączeniu wydań, ${pagesDone} stron, w tym przebiegu ${pagesThisRun}, blokad: ${throttles}, pominiętych stron: ${errors}, luk: ${gaps.length}\n`);
   setState('complete');
+  writeSummary(summaryLines('cykl ukończony', [`| Po połączeniu wydań | ${merged.length} |`,
+    `| Nowe dziś w bibliotece | ${seenReady ? newCount : 'od następnego cyklu'} |`]));
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

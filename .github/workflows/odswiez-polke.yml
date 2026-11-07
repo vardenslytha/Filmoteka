@@ -1,8 +1,9 @@
 name: Odśwież półkę
 
-# Każdy przebieg pobiera porcję katalogu (do ok. 45 min), zapisuje postęp i publikuje stronę.
+# v9. Każdy przebieg pobiera porcję katalogu (do ok. 45 min), zapisuje postęp i publikuje stronę.
 # Następny przebieg wznawia od miejsca, w którym skończył poprzedni. Po pełnym cyklu
-# przez ok. 20 h przebiegi kończą się od razu, bez zapytań do katalogu.
+# przez ok. 20 h katalog nie jest odpytywany; w tym czasie zadanie muzyki dociąga okładki z MusicBrainz.
+# Podsumowanie każdego przebiegu jest na stronie przebiegu (zakładka Summary).
 
 on:
   schedule:
@@ -93,9 +94,10 @@ jobs:
 
   music:
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 75
     outputs:
       state: ${{ steps.harvest.outputs.state }}
+      publish: ${{ steps.decide.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -120,7 +122,7 @@ jobs:
         env:
           RTYPE: audios
           CHECKPOINT: music-checkpoint.json
-          OUT: music.json
+          OUT: music-raw.json
           BASE: music-base.json
           MAX_MINUTES: '45'
         run: node harvester/harvest.mjs
@@ -132,8 +134,51 @@ jobs:
           path: music-checkpoint.json
           key: music-ckpt-${{ github.run_id }}-${{ github.run_attempt }}
 
+      - name: Przywróć cache okładek płyt
+        if: ${{ steps.harvest.outputs.state == 'complete' || steps.harvest.outputs.state == 'partial' || steps.harvest.outputs.state == 'fresh' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: mb-cache.json
+          key: mb-${{ github.run_id }}
+          restore-keys: mb-
+
+      # Po pobraniu katalogu: krótka porcja okładek (15 min). Gdy katalog jest świeży: długa (50 min) na opublikowanych danych.
+      - name: Dociągnij okładki płyt z MusicBrainz
+        id: covers
+        if: ${{ steps.harvest.outputs.state == 'complete' || steps.harvest.outputs.state == 'partial' || steps.harvest.outputs.state == 'fresh' }}
+        continue-on-error: true
+        env:
+          STATE: ${{ steps.harvest.outputs.state }}
+          MB_MINUTES: ${{ steps.harvest.outputs.state == 'fresh' && '50' || '15' }}
+        run: |
+          IN=music-raw.json
+          [ "$STATE" = fresh ] && IN=music-base.json
+          if [ ! -f "$IN" ]; then echo "Brak danych wejściowych ($IN)."; exit 0; fi
+          node harvester/enrich-music.mjs "$IN" mb-cache.json > music.json || cp "$IN" music.json
+
+      - name: Zapisz cache okładek płyt
+        if: ${{ always() && hashFiles('mb-cache.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: mb-cache.json
+          key: mb-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Czy publikować muzykę
+        id: decide
+        env:
+          STATE: ${{ steps.harvest.outputs.state }}
+          CHANGED: ${{ steps.covers.outputs.changed }}
+        run: |
+          P=false
+          if [ "$STATE" = complete ] || [ "$STATE" = partial ]; then P=true; fi
+          if [ "$STATE" = fresh ] && [ "$CHANGED" = true ]; then P=true; fi
+          # gdyby krok okładek padł przed zapisaniem wyniku, publikujemy surowe dane
+          if [ "$P" = true ] && [ ! -s music.json ] && [ -f music-raw.json ]; then cp music-raw.json music.json; fi
+          if [ ! -s music.json ]; then P=false; fi
+          echo "publish=$P" >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@v4
-        if: ${{ steps.harvest.outputs.state == 'complete' || steps.harvest.outputs.state == 'partial' }}
+        if: ${{ steps.decide.outputs.publish == 'true' }}
         with:
           name: music
           path: music.json
@@ -141,11 +186,13 @@ jobs:
 
   build:
     needs: [films, music]
-    # publikujemy, gdy którekolwiek zadanie przyniosło nowe dane (pełne albo porcję)
+    # publikujemy, gdy którekolwiek zadanie przyniosło nowe dane (pełne, porcję albo nowe okładki płyt),
+    # a po wrzuceniu zmian do repo zawsze, żeby nowa wersja strony weszła od razu
     if: >-
       ${{ !cancelled() && (
+        github.event_name == 'push' ||
         needs.films.outputs.state == 'complete' || needs.films.outputs.state == 'partial' ||
-        needs.music.outputs.state == 'complete' || needs.music.outputs.state == 'partial') }}
+        needs.music.outputs.publish == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -163,7 +210,7 @@ jobs:
           path: site
 
       - uses: actions/download-artifact@v4
-        if: ${{ needs.music.outputs.state == 'complete' || needs.music.outputs.state == 'partial' }}
+        if: ${{ needs.music.outputs.publish == 'true' }}
         with:
           name: music
           path: site
@@ -184,3 +231,18 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # Cykl w toku: od razu zamawiamy następny przebieg, zamiast czekać na harmonogram
+  # (GitHub potrafi opóźniać albo pomijać uruchomienia z crona). Przy błędzie łańcuch się zatrzymuje,
+  # a harmonogram co godzinę zostaje jako zapas.
+  next:
+    needs: [films, music]
+    if: ${{ !cancelled() && (needs.films.outputs.state == 'partial' || needs.music.outputs.state == 'partial') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Zamów kolejną porcję
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run odswiez-polke.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
