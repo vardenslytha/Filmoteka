@@ -82,6 +82,9 @@ select{flex:0 1 auto;max-width:100%}
 .tl{position:absolute;z-index:2;top:8px;left:16px;display:flex;flex-direction:column;align-items:flex-start;gap:4px}
 .tl .badge{position:static}
 .badge.rate{color:#ffd78a}
+.badge.rate .vc{color:#e6e9ee;font-weight:400}
+.badge.rate.low,.badge.rate.low .vc{color:#c3c9d3}
+.sheet .stat .low{font-style:italic}
 .badge.new{background:#ffc861;color:#1a1405;font-weight:600}
 .badge.wl{bottom:8px;left:16px;background:#f2f2f2;color:#111}
 .fav{position:absolute;z-index:3;top:6px;right:6px;width:30px;height:30px;border-radius:50%;border:0;background:rgba(8,10,14,.62);color:#f2f2f2;display:grid;place-items:center;padding:0}
@@ -144,6 +147,9 @@ ul.branches li{display:flex;justify-content:space-between;align-items:center;gap
 ul.branches li:first-child{border-top:0}
 ul.branches .nm{font-weight:600}
 ul.branches .ad{font-size:13px;color:var(--muted)}
+ul.branches .ed{font-size:12px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
+ul.branches .ed .ok{color:var(--ok)}
+ul.branches .ed .no{color:var(--no)}
 ul.branches li.mine{background:color-mix(in oklab,var(--accent) 12%,transparent)}
 .actions{display:flex;flex-wrap:wrap;gap:8px}
 .note{font-size:12px;color:var(--muted);margin:0}
@@ -196,7 +202,7 @@ ul.branches li.mine{background:color-mix(in oklab,var(--accent) 12%,transparent)
       <div class="field" id="rateField">
         <span class="lab">Ocena co najmniej <span class="val" id="rMinV"></span></span>
         <input type="range" id="rMin" min="0" max="9" step="0.5" value="0" aria-label="Minimalna ocena">
-        <span class="note">Według TMDB, tylko filmy z co najmniej 20 głosami.</span>
+        <span class="note" id="rNote">Według TMDB, tylko filmy z co najmniej 10 głosami.</span>
       </div>
       <div class="field">
         <span class="lab">Dostępność</span>
@@ -240,7 +246,11 @@ ul.branches li.mine{background:color-mix(in oklab,var(--accent) 12%,transparent)
 <script type="module">
 const CAT = 'https://omnis-br.primo.exlibrisgroup.com/discovery/fulldisplay?vid=48OMNIS_BRP:BRACZ&docid=alma';
 const NEW_DAYS = 30;
+// Oceny TMDB. Sortowanie „Najwyżej oceniane” liczy ocenę ważoną (wzór IMDb):
+// WR = v/(v+m)·R + m/(v+m)·C, gdzie C to średnia ocena całego katalogu. Tytuł z kilkoma głosami ląduje blisko średniej.
+const RATING = { m: 200, minVotes: 10 };   // m: próg głosów; poniżej minVotes ocena jest niewiarygodna (bez gwiazdki)
 const $ = id => document.getElementById(id);
+$('rNote').textContent = `Według TMDB, tylko filmy z co najmniej ${RATING.minVotes} głosami.`;
 const store = { get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}} };
 function norm(s){return (s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/ł/g,'l').replace(/&/g,' and ').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
@@ -283,6 +293,56 @@ function popScore(r){
 const TYPE_PL = [[/Live/, 'Album koncertowy'], [/Compilation/, 'Kompilacja'], [/Soundtrack/, 'Ścieżka dźwiękowa'], [/Remix/, 'Remiksy'],
   [/^EP/, 'EP'], [/^Single/, 'Singiel'], [/^Album/, 'Album studyjny']];
 const typeName = t => (TYPE_PL.find(([re]) => re.test(t || '')) || [])[1] || '';
+// Ten sam film w kilku rekordach katalogu (inny zapis tytułu albo reżysera) łączymy po TMDB ID w jedną kartę.
+// Tylko filmy: serial ma jedno TMDB ID dla wszystkich sezonów i płyt z odcinkami, a to różne płyty.
+function groupByTmdb(recs){
+  const groups = new Map(), out = [];
+  for (const r of recs) {
+    const k = r.tmdb?.kind === 'movie' && r.tmdb.id;
+    if (!k) { out.push(r); continue; }
+    if (groups.has(k)) groups.get(k).push(r); else { groups.set(k, [r]); out.push(k); }
+  }
+  return out.map(x => typeof x === 'object' ? x : mergeGroup(groups.get(x)));
+}
+function mergeGroup(g){
+  if (g.length === 1) return g[0];
+  // główny rekord: najwięcej filii, potem najnowsze wydanie (do niego prowadzi „Zarezerwuj”)
+  g.sort((a, b) => b.h.length - a.h.length || Number(b.y || 0) - Number(a.y || 0));
+  const main = g[0];
+  // filia jest „na półce”, jeśli którykolwiek egzemplarz tam stoi; wypożyczona tylko, gdy wszystkie są wypożyczone
+  const byLib = new Map();
+  for (const r of g) for (const [c, ok] of r.h) byLib.set(c, Math.max(byLib.get(c) ?? 0, ok));
+  const seen = new Set([main.id]), alt = [];
+  for (const r of g) for (const a of [[r.id, r.y, r.f], ...r.alt]) if (!seen.has(a[0])) { seen.add(a[0]); alt.push(a); }
+  const first = k => g.find(r => r[k]?.length)?.[k] || main[k];
+  const years = g.map(r => Number(r.y)).filter(Boolean);
+  const n = g.map(r => r.n || '').sort().pop();
+  return {...main, o: main.o || g.find(r => r.o)?.o, y: years.length ? String(Math.min(...years)) : main.y,
+    g: first('g'), c: first('c'), d: first('d'), a: main.a || g.find(r => r.a)?.a || '',
+    G: [...new Set(g.flatMap(r => r.G))], fs: [...new Set(g.flatMap(r => r.fs))], h: [...byLib.entries()], alt,
+    n: n || undefined, isNew: g.some(r => r.isNew), img: main.img || g.find(r => r.img)?.img || '',
+    key: [...new Set(g.map(r => r.key))].join(' '),
+    ed: g.map(r => ({ id: r.id, y: r.y, fs: r.fs, h: r.h })),   // złączone rekordy: egzemplarze w szczegółach
+    members: [...seen], ownY: main.y };   // ownY: rok wydania głównego rekordu (y to najstarsze z grupy)
+}
+// Ulubione zapisane na rekordzie, który teraz jest częścią złączonej karty, przenosimy na kartę.
+function migrateFavs(recs){
+  const fav = favs.films; let moved = false;
+  for (const r of recs) for (const id of r.members || []) {
+    if (id !== r.id && fav.has(id)) { fav.delete(id); fav.add(r.id); moved = true; }
+  }
+  if (moved) store.set('fav-films', JSON.stringify([...fav]));
+}
+// Do ręcznej weryfikacji dopasowań TMDB (konsola przeglądarki): mało głosów albo rok premiery daleko od roku płyty.
+function reportSuspicious(recs){
+  const rows = recs.filter(r => r.tmdb).map(r => ({ tytuł: r.t, płyta: Number(r.y) || '', tmdb: r.py || '', różnica: r.py && Number(r.y) ? Number(r.y) - r.py : '',
+      głosy: r.tmdb.votes || 0, ocena: r.tmdb.rating ?? '', link: `https://www.themoviedb.org/${r.tmdb.kind}/${r.tmdb.id}` }))
+    .filter(x => x.głosy < RATING.minVotes || (x.różnica !== '' && Math.abs(x.różnica) > 1));
+  if (!rows.length) return;
+  console.groupCollapsed(`Filmoteka: ${rows.length} ${plural(rows.length,'dopasowanie','dopasowania','dopasowań')} TMDB do sprawdzenia (głosy < ${RATING.minVotes} albo rok różny o > 1)`);
+  console.table(rows.sort((a, b) => a.głosy - b.głosy || Math.abs(b.różnica || 0) - Math.abs(a.różnica || 0)));
+  console.groupEnd();
+}
 const cache = {};
 async function load(mode){
   if (cache[mode]) return cache[mode];
@@ -293,14 +353,25 @@ async function load(mode){
   d.recs = d.recs.map(r => {
     const who = (r.d||[]).map(flip);
     const G = SIMPLE[mode].filter(([,re]) => (r.g||[]).some(g => re.test(g))).map(([n]) => n);
-    const rate = r.tmdb?.rating && r.tmdb.votes >= 20 ? r.tmdb.rating : null;
+    const votes = r.tmdb?.rating ? (r.tmdb.votes || 0) : 0;
+    const rate = votes >= RATING.minVotes ? r.tmdb.rating : null;   // ocena wiarygodna: pokazujemy gwiazdkę
     // rok premiery filmu / pierwszego wydania albumu (TMDB, MusicBrainz); bez niego rok wydania płyty z katalogu
     const py = Number((r.p||'').slice(0,4)) || 0;
     const yn = py || Number(r.y) || 0;
-    return {...r, c:r.c||[], g:r.g||[], d:who, G, rate, fs:r.fs||[r.f], alt:r.alt||[], yn, yr: yn ? String(yn) : '', py,
+    return {...r, c:r.c||[], g:r.g||[], d:who, G, rate, votes, fs:r.fs||[r.f], alt:r.alt||[], yn, yr: yn ? String(yn) : '', py,
       img: r.tmdb?.poster || r.cv || '', isNew: !!r.n && r.n >= newSince, pop: popScore(r),
       key: norm(r.t + ' ' + (r.o||'') + ' ' + who.join(' '))};
   });
+  if (mode === 'films') {
+    d.recs = groupByTmdb(d.recs);
+    migrateFavs(d.recs);
+    // C: średnia ocena wszystkich tytułów z jakąkolwiek oceną (po złączeniu duplikatów, żeby film z 5 płytami nie liczył się 5 razy)
+    const rated = d.recs.filter(r => r.votes > 0);
+    const C = rated.length ? rated.reduce((s, r) => s + r.tmdb.rating, 0) / rated.length : 0;
+    for (const r of d.recs) r.wr = r.rate ? (r.votes / (r.votes + RATING.m)) * r.tmdb.rating + (RATING.m / (r.votes + RATING.m)) * C : null;
+    d.ratingMean = C;
+    reportSuspicious(d.recs);
+  }
   const ys = d.recs.map(r => r.yn).filter(y => y > 1880);
   d.minY = ys.length ? Math.min(...ys) : 1900; d.maxY = ys.length ? Math.max(...ys) : new Date().getFullYear();
   d.hasDates = d.recs.some(r => r.n);
@@ -395,7 +466,7 @@ function filtered(){
     new:(a,b)=>(b.n||'').localeCompare(a.n||'')||b.yn-a.yn||byT(a,b),
     pop:(a,b)=>b.pop-a.pop||b.yn-a.yn||byT(a,b),
     avail:(a,b)=>av(b)-av(a)||b.yn-a.yn,
-    top:(a,b)=>(b.rate||0)-(a.rate||0)||(b.tmdb?.votes||0)-(a.tmdb?.votes||0),
+    top:(a,b)=>(b.wr||0)-(a.wr||0)||b.votes-a.votes||byT(a,b),
     artist:(a,b)=>(a.d[0]||'￿').localeCompare(b.d[0]||'￿','pl')||byT(a,b),
   }[state.sort] || byT;
   return list.sort(cmp);
@@ -404,7 +475,7 @@ function card(r){
   const M = MODES[state.mode], a = availAt(r), n = a.filter(h=>h[1]).length, isFav = favs[state.mode].has(r.id);
   const pill = n ? `<span class="pill ok">${state.branch ? 'Na półce' : n + ' ' + plural(n,'filia','filie','filii')}</span>` : `<span class="pill no">${M.status[1]}</span>`;
   const img = r.img;
-  const tl = (r.rate?`<span class="badge rate">★ ${r.rate.toFixed(1)}</span>`:'') + (r.isNew?'<span class="badge new">Nowość</span>':'');
+  const tl = rateBadge(r) + (r.isNew?'<span class="badge new">Nowość</span>':'');
   return `<article class="card" data-id="${r.id}">
     <button class="fav" data-fav="${r.id}" aria-pressed="${isFav}" aria-label="${isFav?'Usuń z ulubionych':'Dodaj do ulubionych'}: ${esc(r.t)}">${HEART}</button>
     <button class="open" aria-label="${esc(r.t)}${r.d[0]?', '+esc(r.d[0]):''}${r.isNew?', nowość':''}">
@@ -413,6 +484,27 @@ function card(r){
         <div class="txt"><span></span><span class="ttl">${esc(r.t)}</span><span class="yr">${esc(r.yr)}${state.mode==='films'&&r.c[0]?' · '+esc(r.c[0]):''}</span></div></div>
       <div class="under">${img?`<span class="t2">${esc(r.t)}</span>`:''}<span class="dir">${esc(r.d[0]||r.g[0]||'')}${img&&r.yr?' · '+esc(r.yr):''}</span>${pill}</div>
     </button></article>`;
+}
+// Ocena z TMDB na kafelku: „★ 8.7 (28 tys.)”; przy mniej niż RATING.minVotes głosach bez gwiazdki i wyszarzona.
+const fmtVotes = n => new Intl.NumberFormat('pl-PL', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
+const LOW_VOTES = `Za mało głosów w TMDB (mniej niż ${RATING.minVotes}), ocena niewiarygodna`;
+function rateBadge(r){
+  if (!r.tmdb?.rating || !r.votes) return '';
+  const v = `<span class="vc">(${fmtVotes(r.votes)})</span>`;
+  return r.rate ? `<span class="badge rate">★ ${r.rate.toFixed(1)} ${v}</span>`
+    : `<span class="badge rate low" title="${LOW_VOTES}">${r.tmdb.rating.toFixed(1)} ${v}</span>`;
+}
+function rateText(r){
+  if (!r.tmdb?.rating || !r.votes) return '';
+  const n = `${r.votes.toLocaleString('pl-PL')} ${plural(r.votes,'głos','głosy','głosów')}`;
+  return r.rate ? ` · ★ ${r.rate.toFixed(1)} (${n} w TMDB)` : ` · <span class="low" title="${LOW_VOTES}">${r.tmdb.rating.toFixed(1)} (${n}, niewiarygodna)</span>`;
+}
+// Karta złączona z kilku rekordów: pod filią wypisujemy, które wydania tam stoją i w jakim stanie.
+function edLine(r, code, M){
+  if (!r.ed) return '';
+  const here = r.ed.map(e => [e, e.h.find(h => h[0] === code)]).filter(([, h]) => h);
+  if (!here.length) return '';
+  return `<div class="ed">${here.map(([e, h]) => `<span class="${h[1]?'ok':'no'}">${esc(e.fs.map(f => M.fmtName[f]||f).join('/'))}${e.y?' '+esc(e.y):''}: ${h[1]?M.status[0].toLowerCase():M.status[1].toLowerCase()}</span>`).join(' · ')}</div>`;
 }
 function render(){
   if (!DATA) return;
@@ -451,7 +543,7 @@ function openSheet(id){
     <div class="head">
       <div class="thumb">${r.img?`<img src="${r.img}" alt="">`:`<div style="position:absolute;inset:0;background:${coverStyle(r)}"></div>`}</div>
       <div><h2 id="sTitle">${esc(r.t)}</h2>${r.o?`<p class="orig">${esc(r.o)}</p>`:''}
-        <p class="stat">${esc(r.yr)} · ${esc(fmtLabel(r))}${r.rate?` · ★ ${r.rate.toFixed(1)}`:''}<br>
+        <p class="stat">${esc(r.yr)} · ${esc(fmtLabel(r))}${rateText(r)}<br>
         ${r.h.length ? (nOk ? `<b>Na półce w ${nOk} z ${r.h.length} ${plural(r.h.length,'miejsca','miejsc','miejsc')}</b>` : `<b class="no">Wszystkie egzemplarze wypożyczone</b>`) : ''}</p></div>
     </div>
     <div class="actions">
@@ -474,9 +566,9 @@ function openSheet(id){
       ${r.n?`<dt>W katalogu od</dt><dd>${esc(fmtDate(r.n))}${r.isNew?' · nowość':''}</dd>`:''}
       <dt>Wypożyczenie</dt><dd>14 dni</dd>
     </dl>
-    ${r.alt.length?`<p class="sec">Wydania w katalogu (${r.alt.length+1})</p><div class="actions"><a class="btn" href="${CAT}${r.id}" target="_blank" rel="noopener">${esc(M.fmtName[r.f]||r.f)}${r.y?' · '+esc(r.y):''}</a>${r.alt.map(([id,y,f])=>`<a class="btn" href="${CAT}${id}" target="_blank" rel="noopener">${esc(M.fmtName[f]||f)}${y?' · '+esc(y):''}</a>`).join('')}</div><p class="note">Egzemplarze wszystkich wydań są zebrane na liście poniżej. Rezerwujesz konkretne wydanie.</p>`:''}
+    ${r.alt.length?`<p class="sec">Wydania w katalogu (${r.alt.length+1})</p><div class="actions"><a class="btn" href="${CAT}${r.id}" target="_blank" rel="noopener">${esc(M.fmtName[r.f]||r.f)}${(r.ownY||r.y)?' · '+esc(r.ownY||r.y):''}</a>${r.alt.map(([id,y,f])=>`<a class="btn" href="${CAT}${id}" target="_blank" rel="noopener">${esc(M.fmtName[f]||f)}${y?' · '+esc(y):''}</a>`).join('')}</div><p class="note">Egzemplarze wszystkich wydań są zebrane na liście poniżej. Rezerwujesz konkretne wydanie.</p>`:''}
     <p class="sec">Gdzie stoi (${r.h.length} ${plural(r.h.length,'miejsce','miejsca','miejsc')})</p>
-    ${r.h.length?`<ul class="branches">${sorted.map(([c,ok]) => { const l=libName(c); return `<li class="${c===state.branch?'mine':''}"><div><div class="nm">${esc(l.name)}</div><div class="ad">${esc(l.addr)}</div></div><span class="pill ${ok?'ok':'no'}">${ok?M.status[0]:M.status[1]}</span></li>`; }).join('')}</ul>`:'<p class="note">Katalog nie podaje egzemplarzy do wypożyczenia. Szczegóły sprawdzisz w katalogu.</p>'}
+    ${r.h.length?`<ul class="branches">${sorted.map(([c,ok]) => { const l=libName(c); return `<li class="${c===state.branch?'mine':''}"><div><div class="nm">${esc(l.name)}</div><div class="ad">${esc(l.addr)}</div>${edLine(r, c, M)}</div><span class="pill ${ok?'ok':'no'}">${ok?M.status[0]:M.status[1]}</span></li>`; }).join('')}</ul>`:'<p class="note">Katalog nie podaje egzemplarzy do wypożyczenia. Szczegóły sprawdzisz w katalogu.</p>'}
     <p class="note">Dostępność według stanu katalogu z chwili pobrania danych. Rezerwacja wymaga zalogowania w katalogu biblioteki.</p>`;
   $('sheet').hidden = false; $('scrim').hidden = false; $('sClose').focus();
   $('sClose').onclick = closeSheet;
