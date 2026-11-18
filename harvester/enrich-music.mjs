@@ -15,7 +15,9 @@ const UA = `PolkaRaczynskich/1.0 ( ${repo} )`;   // MusicBrainz wymaga opisowego
 const MATCH_VERSION = 1;
 // Wersja reguł szukania. Płyty, które nie dopasowały się starszymi regułami, sprawdzamy ponownie od razu
 // (dopasowane zostają w cache). 2 = czyszczenie tytułów z doklejonych wykonawców i ról.
-const MATCHER = 2;
+// 3 = zapasowe zapytania (luźne słowa tytułu, sam tytuł z kontrolą wszystkich wykonawców), tytuły równoległe „ = ”,
+//     nazwiska w formie „Nazwisko, Imię. Rola…”, rok nie blokuje przy dokładnym tytule.
+const MATCHER = 3;
 const MB_GAP_MS = Number(process.env.MB_GAP_MS || 1100);     // odstęp między zapytaniami do MusicBrainz
 const MINUTES = Number(process.env.MB_MINUTES || 15);
 const RETRY_MISSES_AFTER_DAYS = 60;
@@ -53,19 +55,31 @@ const baseTitle = (t) => (t || '').replace(/\s*[\[(].*?[\])]\s*/g, ' ').split(/\
 // Katalog dokleja do tytułu albumu wykonawców i role: "Kind of blue Miles Davis [wyk.]",
 // "Officium novum Jan Garbarek, The Hilliard Ensamble", "WASZA WSPANIAŁOŚĆ wyk., muz. i sł". Odcinamy to.
 const ROLE_CUT = /\s+(?:wyk\.|wyk\b|muz\.|sł\.|sł\b|słowa\b|tekst\b|wykonanie\b|dyr\.|dyryguje\b|aranż|oprac\.|feat\.|ft\.)(?:.*)$/i;
-function albumTitle(t, who) {
-  let s = baseTitle((t || '').replace(/\s*\[[^\]]*\]\s*/g, ' ')).replace(ROLE_CUT, '').trim();
-  const low = s.toLowerCase();
+// małe litery bez polskich/obcych znaków, ta sama długość co oryginał (indeksy się zgadzają)
+const fold = (s) => [...s].map((ch) => (ch === 'ł' || ch === 'Ł' ? 'l' : ch.normalize('NFD')[0]).toLowerCase()).join('');
+function albumTitle(t, who, part = 0) {
+  let s = (t || '').replace(/\s*\[[^\]]*\]\s*/g, ' ').split(/\s+=\s+/)[part] || '';   // tytuł równoległy „A = B”
+  s = baseTitle(s).replace(ROLE_CUT, '').trim();
+  const low = fold(s);
   let cutAt = -1;
   for (const n of who || []) {
     for (const v of [n, n.replace(/^The\s+/i, '')]) {
-      const i = v.length > 2 ? low.indexOf(' ' + v.toLowerCase()) : -1;
+      const i = v.length > 2 ? low.indexOf(' ' + fold(v)) : -1;
       if (i > 0 && (cutAt < 0 || i < cutAt)) cutAt = i;   // nazwisko w środku albo na końcu tytułu
     }
   }
-  if (cutAt > 0) s = s.slice(0, cutAt);
-  return s.replace(/[\s.,:;\/-]+$/, '').trim();
+  if (cutAt > 0) s = s.slice(0, [...s].slice(0, cutAt).join('').length);
+  return s.replace(/[\s.,:;\/-]+$/, '').replace(/\s+the$/i, '').trim();   // „Yellow submarine The”
 }
+// „Yorke, Thom. Śpiew, gitara…” → „Thom Yorke”; „Bach, Johann Sebastian” → „Johann Sebastian Bach”
+function personName(n) {
+  let s = (n || '').replace(/\.\s+\p{Lu}\p{Ll}{3,}.*$/u, '').replace(/[.,;\s]+$/, '').trim();
+  const m = s.match(/^([^,\d]+),\s*([^,\d]+)$/);
+  if (m) s = `${m[2].trim()} ${m[1].trim()}`;
+  return s;
+}
+// słowa do luźnego zapytania (bez składni Lucene)
+const words = (s) => s.replace(/[+\-&|!(){}\[\]^"~*?:\\\/]/g, ' ').split(/\s+/).filter((w) => w.length > 1).slice(0, 8).join(' ');
 const phrase = (s) => '"' + s.replace(/[\\"]/g, '\\$&') + '"';
 
 // Zerwane połączenie (np. „fetch failed”) ponawiamy kilka razy, zanim uznamy płytę za błąd.
@@ -109,32 +123,61 @@ async function hasCover(rg) {
 }
 
 async function match(r) {
-  const title = albumTitle(r.t, r.d);
-  const who = r.d || [];
+  const who = (r.d || []).map(personName).filter((n) => n.length > 1);
+  const title = albumTitle(r.t, who.length ? who : r.d);
   if (!title || !who.length) return null;      // bez wykonawcy (składanki) łatwo o cudzą okładkę
-  const q = `releasegroup:${phrase(title)} AND artist:${phrase(who[0])}`;
-  const { 'release-groups': groups = [] } = await mb(`/ws/2/release-group/?query=${encodeURIComponent(q)}&fmt=json&limit=8`);
-  const tk = norm(title), discYear = Number(r.y) || 0;
-  const people = who.flatMap((n) => [norm(n), n.trim().includes(' ') ? surname(n) : null]).filter(Boolean);
+  const discYear = Number(r.y) || 0;
+  let tk = norm(title);
+  const people = who.flatMap((n) => [norm(n), n.trim().includes(' ') ? surname(n) : null]).filter((p) => p && p.length > 2);
   // przy braku dopasowania zapamiętujemy, który warunek odpadł – do diagnozy w podsumowaniu
   const why = { title: 0, who: 0, year: 0, score: 0 };
-  const cands = groups.filter((g) => {
+  let seen = 0;
+  const check = (groups, minScore) => groups.filter((g) => {
     const gt = norm(baseTitle(g.title));
-    const titleOk = gt === tk || gt.startsWith(tk + ' ') || tk.startsWith(gt + ' ');
+    const exact = gt === tk;
+    // katalog bywa dłuższy („Nabucco Verdi”, „Gurrelieder Chamber symphony no. 1”), ale bardzo krótki tytuł MB to za mało
+    const titleOk = exact || (gt.length >= 4 && tk.startsWith(gt + ' ')) || tk.length >= 4 && gt.startsWith(tk + ' ');
     const credits = (g['artist-credit'] || []).flatMap((c) => [c.name, c.artist?.name, c.artist?.['sort-name']?.split(',')[0]]).filter(Boolean);
     const whoOk = credits.some((c) => { const n = norm(c); return people.includes(n) || people.includes(surname(c)); });
     const y = Number((g['first-release-date'] || '').slice(0, 4));
-    const yearOk = !discYear || !y || y <= discYear + 1;
-    const scoreOk = (g.score ?? 100) >= 70;
+    // rok blokuje tylko przy niedokładnym tytule (MusicBrainz często zna tylko późniejsze wydanie)
+    const yearOk = exact || !discYear || !y || y <= discYear + 1;
+    const scoreOk = (g.score ?? 100) >= minScore;
     if (!titleOk) why.title++; else if (!whoOk) why.who++; else if (!yearOk) why.year++; else if (!scoreOk) why.score++;
     return titleOk && whoOk && yearOk && scoreOk;
   }).sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (a['primary-type'] === 'Album' ? -1 : 0) - (b['primary-type'] === 'Album' ? -1 : 0));
+  const search = async (q, limit) => {
+    const { 'release-groups': groups = [] } = await mb(`/ws/2/release-group/?query=${encodeURIComponent(q)}&fmt=json&limit=${limit}`);
+    seen += groups.length;
+    return groups;
+  };
+  // 1) dokładny tytuł + pierwszy wykonawca
+  let first = await search(`releasegroup:${phrase(title)} AND artist:${phrase(who[0])}`, 8);
+  let cands = check(first, 70);
+  // 2) luźne słowa tytułu + wykonawca (tytuł z doklejkami, inna kolejność słów)
+  if (!cands.length && words(title)) {
+    const g2 = await search(`releasegroup:(${words(title)}) AND artist:${phrase(who[0])}`, 10);
+    if (!first.length) first = g2;
+    cands = check(g2, 50);
+  }
+  // 3) sam dokładny tytuł; wykonawcą może być ktokolwiek z katalogu (pierwszy bywa kompozytorem albo autorem)
   if (!cands.length) {
-    const reason = !groups.length ? 'brak wyników' : why.title === groups.length ? 'tytuł' : why.who ? 'wykonawca' : why.year ? 'rok' : 'trafność';
+    const g3 = await search(`releasegroup:${phrase(title)}`, 15);
+    if (!first.length) first = g3;
+    cands = check(g3, 70);
+  }
+  // 4) drugi tytuł równoległy („Koncert skrzypcowy = Violin concerto”)
+  const alt = albumTitle(r.t, who.length ? who : r.d, 1);
+  if (!cands.length && alt && norm(alt) !== tk) {
+    tk = norm(alt);
+    cands = check(await search(`releasegroup:${phrase(alt)} AND artist:${phrase(who[0])}`, 8), 70);
+  }
+  if (!cands.length) {
+    const reason = !seen ? 'brak wyników' : why.title >= seen ? 'tytuł' : why.who ? 'wykonawca' : why.year ? 'rok' : 'trafność';
     misses[reason] = (misses[reason] || 0) + 1;
-    if (missSamples.length < 15) {
-      const g = groups[0];
-      missSamples.push(`${r.t} / ${who[0]} (${r.y || '?'}) → ${reason}${g ? `; MB: ${g.title} / ${(g['artist-credit'] || []).map((c) => c.name).join(', ')} (${(g['first-release-date'] || '?').slice(0, 4)}, ${g.score})` : ''}`);
+    if (missSamples.length < 25) {
+      const g = first[0];
+      missSamples.push(`${r.t} / ${who[0]} (${r.y || '?'}) [szukano: ${title}] → ${reason}${g ? `; MB: ${g.title} / ${(g['artist-credit'] || []).map((c) => c.name).join(', ')} (${(g['first-release-date'] || '?').slice(0, 4)}, ${g.score})` : ''}`);
     }
     return null;
   }

@@ -31,11 +31,13 @@ const MATCH_VERSION = 2;
 const CONCURRENCY = 8;            // TMDB pozwala na ok. 40 zapytań/s
 const RETRY_MISSES_AFTER_DAYS = 30;
 const IMG = 'https://image.tmdb.org/t/p/w342';
-// Raport do ręcznej weryfikacji: dopasowania z małą liczbą głosów albo z rokiem premiery daleko od roku płyty
-const CHECK_MIN_VOTES = 10;
-const CHECK_YEAR_DIFF = 1;
-// Różnicę roku zgłaszamy tylko przy mniej znanych tytułach: znany film wydany na DVD po latach to zwykle dobre dopasowanie.
-const CHECK_YEAR_MAX_VOTES = 500;
+// Raport do ręcznej weryfikacji. Dopasowanie potwierdzone reżyserem z katalogu i z tym samym tytułem uznajemy za pewne
+// (stary film wydany na DVD po latach to norma). Zgłaszamy tylko:
+//  - dopasowania bez reżysera (sam tytuł): mało głosów albo premiera dużo wcześniej niż płyta (remake? inna wersja?),
+//  - dopasowania z reżyserem, ale tylko po początku tytułu (np. „Hejter” → „Sala samobójców”) i z dużą różnicą lat.
+const CHECK_TITLE_ONLY_MIN_VOTES = 50;
+const CHECK_TITLE_ONLY_YEAR_DIFF = 5;
+const CHECK_PREFIX_YEAR_DIFF = 3;
 
 const rawCache = cachePath && existsSync(cachePath) ? JSON.parse(readFileSync(cachePath, 'utf8')) : {};
 const cache = Object.fromEntries(Object.entries(rawCache).filter(([, c]) => c.v === MATCH_VERSION));
@@ -144,8 +146,14 @@ async function worker() {
     if (c && !c.miss) {
       hits++;
       const discY = Number(r.y) || 0, tmdbY = Number((c.date || '').slice(0, 4)) || 0;
-      const fewVotes = (c.votes || 0) < CHECK_MIN_VOTES, yearOff = discY && tmdbY && Math.abs(discY - tmdbY) > CHECK_YEAR_DIFF && (c.votes || 0) < CHECK_YEAR_MAX_VOTES;
-      if (fewVotes || yearOff) suspicious.push({ cat: r.t, discY, tmdb: c.title || c.orig, tmdbY, votes: c.votes || 0, fewVotes, yearOff,
+      const diff = discY && tmdbY ? discY - tmdbY : 0, votes = c.votes || 0;
+      const byDirector = (r.d || []).length > 0;   // match() przy znanym reżyserze wymaga jego zgodności
+      const keys = [clean(r.o), clean(r.t)].filter(Boolean).map(norm);
+      const sameTitle = [c.title, c.orig].filter(Boolean).map(norm).some((t) => keys.includes(t));
+      const why = !byDirector
+        ? (votes < CHECK_TITLE_ONLY_MIN_VOTES ? 'sam tytuł, mało głosów' : diff > CHECK_TITLE_ONLY_YEAR_DIFF ? 'sam tytuł, stara premiera' : '')
+        : (!sameTitle && diff > CHECK_PREFIX_YEAR_DIFF ? 'inny tytuł' : '');
+      if (why) suspicious.push({ cat: r.t, discY, tmdb: c.title || c.orig, tmdbY, votes, diff, why,
         url: `https://www.themoviedb.org/${c.kind}/${c.id}` });
       // Tytuł z katalogu bywa pomieszany; polski tytuł z TMDB jest czystszy.
       if (c.kind === 'movie' && c.title) { r.t = c.title; r.o = c.orig && norm(c.orig) !== norm(c.title) ? c.orig : undefined; }
@@ -162,20 +170,21 @@ process.stderr.write(`Gotowe: ${data.recs.length} filmów, z okładką ${hits}, 
 if (cachePath && LOOKUPS) writeFileSync(cachePath, JSON.stringify(cache));
 
 // ---------- dopasowania do sprawdzenia ----------
-// Najpierw mało głosów (tu częściej trafia się cudzy wpis, np. składanka odcinków), potem największa różnica lat.
-suspicious.sort((a, b) => b.fewVotes - a.fewVotes || a.votes - b.votes || Math.abs(b.discY - b.tmdbY) - Math.abs(a.discY - a.tmdbY));
-const nFew = suspicious.filter((x) => x.fewVotes).length, nYear = suspicious.filter((x) => x.yearOff).length;
-const line = (x) => `${x.cat} (płyta ${x.discY || '?'}) → TMDB: ${x.tmdb} (${x.tmdbY || '?'}), głosy ${x.votes}${x.fewVotes ? ' [mało głosów]' : ''}${x.yearOff ? ` [rok ${x.discY - x.tmdbY > 0 ? '+' : ''}${x.discY - x.tmdbY}]` : ''} ${x.url}`;
+// Najpierw „inny tytuł” (najczęściej błędne), potem sam tytuł z małą liczbą głosów, na końcu stare premiery; w grupie od najmniej głosów.
+const ORDER = ['inny tytuł', 'sam tytuł, mało głosów', 'sam tytuł, stara premiera'];
+suspicious.sort((a, b) => ORDER.indexOf(a.why) - ORDER.indexOf(b.why) || a.votes - b.votes || b.diff - a.diff);
+const counts = ORDER.map((k) => `${k}: ${suspicious.filter((x) => x.why === k).length}`).join(', ');
+const line = (x) => `${x.cat} (płyta ${x.discY || '?'}) → TMDB: ${x.tmdb} (${x.tmdbY || '?'}), głosy ${x.votes} [${x.why}${x.diff ? `, rok ${x.diff > 0 ? '+' : ''}${x.diff}` : ''}] ${x.url}`;
 const plural = (n, one, few, many) => n === 1 ? one : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)) ? few : many;
-process.stderr.write(`\nDo sprawdzenia: ${suspicious.length} ${plural(suspicious.length, 'dopasowanie', 'dopasowania', 'dopasowań')} (głosy < ${CHECK_MIN_VOTES}: ${nFew}, rok płyty różny od premiery o > ${CHECK_YEAR_DIFF} przy < ${CHECK_YEAR_MAX_VOTES} głosach: ${nYear})\n`);
+process.stderr.write(`\nDo sprawdzenia: ${suspicious.length} ${plural(suspicious.length, 'dopasowanie', 'dopasowania', 'dopasowań')} (${counts})\n`);
 for (const x of suspicious) process.stderr.write(`  ${line(x)}\n`);
 if (process.env.GITHUB_STEP_SUMMARY && suspicious.length) {
   const MAX = 300, esc = (s) => String(s).replace(/\|/g, '\\|');
   appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
     '### Filmy: dopasowania TMDB do sprawdzenia', '',
-    `Głosy < ${CHECK_MIN_VOTES}: **${nFew}** · rok płyty różny od premiery o > ${CHECK_YEAR_DIFF} przy < ${CHECK_YEAR_MAX_VOTES} głosach: **${nYear}**`, '',
-    '| Tytuł w katalogu | Płyta | TMDB | Premiera | Głosy |', '|---|---|---|---|---|',
-    ...suspicious.slice(0, MAX).map((x) => `| ${esc(x.cat)} | ${x.discY || '?'} | [${esc(x.tmdb)}](${x.url}) | ${x.tmdbY || '?'}${x.yearOff ? ' ⚠' : ''} | ${x.votes}${x.fewVotes ? ' ⚠' : ''} |`),
+    `${counts}`, '',
+    '| Tytuł w katalogu | Płyta | TMDB | Premiera | Głosy | Powód |', '|---|---|---|---|---|---|',
+    ...suspicious.slice(0, MAX).map((x) => `| ${esc(x.cat)} | ${x.discY || '?'} | [${esc(x.tmdb)}](${x.url}) | ${x.tmdbY || '?'} | ${x.votes} | ${x.why} |`),
     suspicious.length > MAX ? `\n…i ${suspicious.length - MAX} więcej (pełna lista w logu kroku).` : '', '', ''].join('\n'));
 }
 if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${asked + dated > 0}\n`);
