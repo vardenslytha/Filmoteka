@@ -33,10 +33,11 @@ const RETRY_MISSES_AFTER_DAYS = 30;
 const IMG = 'https://image.tmdb.org/t/p/w342';
 // Raport do ręcznej weryfikacji. Dopasowanie potwierdzone reżyserem z katalogu i z tym samym tytułem uznajemy za pewne
 // (stary film wydany na DVD po latach to norma). Zgłaszamy tylko:
-//  - dopasowania bez reżysera (sam tytuł): mało głosów albo premiera dużo wcześniej niż płyta (remake? inna wersja?),
+//  - dopasowania bez reżysera (sam tytuł): bardzo mało głosów albo mało znany film z premierą dużo wcześniej niż płyta
+//    (znany stary film na nowej płycie to zwykle dobre dopasowanie),
 //  - dopasowania z reżyserem, ale tylko po początku tytułu (np. „Hejter” → „Sala samobójców”) i z dużą różnicą lat.
-const CHECK_TITLE_ONLY_MIN_VOTES = 50;
-const CHECK_TITLE_ONLY_YEAR_DIFF = 5;
+const CHECK_TITLE_ONLY_MIN_VOTES = 10;
+const CHECK_TITLE_ONLY_YEAR_DIFF = 10, CHECK_TITLE_ONLY_YEAR_MAX_VOTES = 100;
 const CHECK_PREFIX_YEAR_DIFF = 3;
 
 const rawCache = cachePath && existsSync(cachePath) ? JSON.parse(readFileSync(cachePath, 'utf8')) : {};
@@ -151,7 +152,7 @@ async function worker() {
       const keys = [clean(r.o), clean(r.t)].filter(Boolean).map(norm);
       const sameTitle = [c.title, c.orig].filter(Boolean).map(norm).some((t) => keys.includes(t));
       const why = !byDirector
-        ? (votes < CHECK_TITLE_ONLY_MIN_VOTES ? 'sam tytuł, mało głosów' : diff > CHECK_TITLE_ONLY_YEAR_DIFF ? 'sam tytuł, stara premiera' : '')
+        ? (votes < CHECK_TITLE_ONLY_MIN_VOTES ? 'sam tytuł, mało głosów' : diff > CHECK_TITLE_ONLY_YEAR_DIFF && votes < CHECK_TITLE_ONLY_YEAR_MAX_VOTES ? 'sam tytuł, stara premiera' : '')
         : (!sameTitle && diff > CHECK_PREFIX_YEAR_DIFF ? 'inny tytuł' : '');
       if (why) suspicious.push({ cat: r.t, discY, tmdb: c.title || c.orig, tmdbY, votes, diff, why,
         url: `https://www.themoviedb.org/${c.kind}/${c.id}` });
