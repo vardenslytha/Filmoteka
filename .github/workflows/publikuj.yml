@@ -29,12 +29,6 @@ jobs:
   szybka:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    concurrency:
-      group: pages-deploy
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -115,7 +109,30 @@ jobs:
         with:
           path: site
           name: strona-szybka
-      - id: deployment
+
+  publikuj-szybka:
+    needs: szybka
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.d2.outputs.page_url || steps.d1.outputs.page_url }}
+    steps:
+      # osobny job: paczka jest wtedy już widoczna w API artefaktów
+      # (w tym samym jobie deploy-pages potrafił jej nie znaleźć – „No artifacts named …”, 23–24.11)
+      - id: d1
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: strona-szybka
+      - name: Odczekaj przed ponowną próbą
+        if: ${{ steps.d1.outcome == 'failure' }}
+        run: sleep 60
+      - id: d2
+        if: ${{ steps.d1.outcome == 'failure' }}
         uses: actions/deploy-pages@v4
         with:
           artifact_name: strona-szybka
@@ -218,17 +235,29 @@ jobs:
           name: strona-pelna
 
   opublikuj:
-    needs: wzbogac
+    needs: [wzbogac, publikuj-szybka]   # pełna wersja zawsze po szybkiej
     if: ${{ !cancelled() && needs.wzbogac.outputs.changed == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     concurrency:
       group: pages-deploy
       cancel-in-progress: false
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.d2.outputs.page_url || steps.d1.outputs.page_url }}
     steps:
-      - id: deployment
+      # osobny job: paczka jest wtedy już widoczna w API artefaktów
+      # (w tym samym jobie deploy-pages potrafił jej nie znaleźć – „No artifacts named …”, 23–24.11)
+      - id: d1
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: strona-pelna
+      - name: Odczekaj przed ponowną próbą
+        if: ${{ steps.d1.outcome == 'failure' }}
+        run: sleep 60
+      - id: d2
+        if: ${{ steps.d1.outcome == 'failure' }}
         uses: actions/deploy-pages@v4
         with:
           artifact_name: strona-pelna
